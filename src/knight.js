@@ -14,7 +14,7 @@
 import * as THREE from 'three';
 import { INK, WHITE, ICHOR } from './fx.js';
 import { lathe, capsule, rbox, plate, bladeGeo } from './shapes.js';
-import { sweep, targets } from './combat.js';
+import { sweep, settleSoft, targets } from './combat.js';
 
 // ---------- tuning numbers ----------
 const WALK = 4.6;
@@ -26,6 +26,11 @@ const ROLL_COST = 22;
 const PARRY_WINDOW = 0.22;       // seconds after raising the shield that a parry counts
 const HOLD_FOR_HEAVY = 0.26;     // hold the button this long to start charging
 const RADIUS = 0.45;
+const STAGGER_TIME = 0.38;       // how long a proper hit knocks you off balance
+const LIGHT_BLOW = 20;           // hits weaker than this don't interrupt your swing
+const CLICK_MEMORY = 0.4;        // a click this long before you can act still counts
+const AIM_RANGE = 5;             // swings turn toward an enemy this close
+const STEP_IN_MAX = 2.2;         // ...and step up to this far toward it
 
 // The three slashes of the combo, plus the heavy slam.
 // windup/active/recover are in seconds. "from"/"to" name the poses below.
@@ -46,10 +51,14 @@ const P = (o) => ({ ...BASE, ...o });
 const POSES = {
   idle: P({}),
   block: P({ torsoY: -0.3, armLx: -1.0, armLy: -1.3, elbowL: -0.65, armRx: -0.2, wristR: -1.2 }),
-  S1a: P({ torsoY: -0.8, armRx: -1.75, armRy: -1.5, armRz: 0, elbowR: -0.2, wristR: -0.05 }),
-  S1b: P({ torsoY: 0.75, armRx: -1.7, armRy: 1.35, armRz: 0, elbowR: -0.05, wristR: 0.05 }),
-  S2a: P({ torsoY: 0.7, armRx: -1.65, armRy: 1.3, armRz: 0, elbowR: -0.5, wristR: -0.3 }),
-  S2b: P({ torsoY: -0.75, armRx: -1.35, armRy: -1.45, armRz: 0, elbowR: -0.1, wristR: -0.1 }),
+  // slash 1 cuts diagonally from high on the right to low on the left;
+  // slash 2 comes back up from low left to high right. Both are level
+  // through the middle, at about head-and-shoulders height.
+  // (Blade angle = armRx + elbowR + wristR: about -1.57 means level.)
+  S1a: P({ torsoY: -0.8, armRx: -1.75, armRy: -1.5, armRz: 0, elbowR: -0.2, wristR: -0.1 }),
+  S1b: P({ torsoY: 0.75, armRx: -1.12, armRy: 1.35, armRz: 0, elbowR: -0.05, wristR: 0.2 }),
+  S2a: P({ torsoY: 0.7, armRx: -1.15, armRy: 1.3, armRz: 0, elbowR: -0.1, wristR: 0.2 }),
+  S2b: P({ torsoY: -0.75, armRx: -1.75, armRy: -1.45, armRz: 0, elbowR: -0.15, wristR: -0.15 }),
   // the overhead and the slam come down the middle, right onto the heart
   S3a: P({ torsoX: -0.25, torsoY: 0.1, armRx: -3.0, armRy: 0.3, armRz: 0, elbowR: -0.5, wristR: -0.4 }),
   S3b: P({ torsoX: 0.35, torsoY: 0.2, armRx: -0.65, armRy: 0.3, armRz: 0, elbowR: -0.05, wristR: -0.15 }),
@@ -85,6 +94,11 @@ export class Knight {
     this.reset();
     this._b0 = new THREE.Vector3(); this._t0 = new THREE.Vector3();
     this._b1 = new THREE.Vector3(); this._t1 = new THREE.Vector3();
+    this._pb = new THREE.Vector3(); this._pt = new THREE.Vector3();
+    this._sb = new THREE.Vector3(); this._st = new THREE.Vector3();
+    this._rootNow = new THREE.Vector3();
+    this.prevRoot = new THREE.Vector3();
+    this.prevActiveT = 0;
   }
 
   reset() {
@@ -367,14 +381,17 @@ export class Knight {
     for (const a of targets(this.game)) {
       const dx = a.pos.x - this.pos.x, dz = a.pos.z - this.pos.z;
       const d = Math.hypot(dx, dz);
-      if (d > 4.5) continue;
+      if (d > AIM_RANGE) continue;
       const dot = (dx * fwd.x + dz * fwd.z) / (d || 1);
-      if (dot < 0.35) continue;
-      const score = d * (2 - dot);
+      if (dot < -0.2 && d > 2) continue;          // ignore enemies well behind you
+      const score = d * (2.2 - dot);              // prefer close, and in front
       if (score < bestScore) { bestScore = score; best = a; }
     }
     return best;
   }
+
+  /** How far from an enemy's centre you want to be for the blade to land. */
+  sweetSpot(t) { return 1.3 + t.radius * 0.4; }
 
   // ================================================================ actions
   startAttack(n, moveDir) {
@@ -387,8 +404,16 @@ export class Knight {
     this.poseFrom = { ...this.pose };
     this.spend(a.stamina);
     const t = this.aimTarget(moveDir);
-    if (t) this.facing = Math.atan2(t.pos.x - this.pos.x, t.pos.z - this.pos.z);
-    else if (moveDir.lengthSq() > 0.01) this.facing = Math.atan2(moveDir.x, moveDir.z);
+    this.attack.target = t;
+    if (t) {
+      this.facing = Math.atan2(t.pos.x - this.pos.x, t.pos.z - this.pos.z);
+      // Step in during the wind-up: if the enemy is a little too far away,
+      // slide toward it so the blade reaches. (A slide of speed v carries
+      // you about v/10 metres, because it fades away at a rate of 10.)
+      const d = Math.hypot(t.pos.x - this.pos.x, t.pos.z - this.pos.z);
+      const step = Math.min(STEP_IN_MAX, Math.max(0, d - this.sweetSpot(t)));
+      this.forward(this.lunge).multiplyScalar(step * 10);
+    } else if (moveDir.lengthSq() > 0.01) this.facing = Math.atan2(moveDir.x, moveDir.z);
     this.game.angels.onKnightAttack(this);
     if (a.windup === 0) this.beginActive();
   }
@@ -397,9 +422,21 @@ export class Knight {
     const a = this.attack;
     a.phase = 'active';
     a.t = 0;
-    this.forward(this.lunge).multiplyScalar(a.lunge);
+    // The swing itself carries you forward a little too, unless you're
+    // already right on top of your target (or still sliding toward it).
+    let lunge = a.lunge;
+    const t = a.target;
+    if (t && t.alive) {
+      this.facing = Math.atan2(t.pos.x - this.pos.x, t.pos.z - this.pos.z);
+      const d = Math.hypot(t.pos.x - this.pos.x, t.pos.z - this.pos.z);
+      const gap = d - this.sweetSpot(t);
+      lunge = Math.min(lunge, Math.max(0, (gap + 0.3) * 10));
+      if (a.heavy && gap > 0) lunge = Math.max(lunge, Math.min(STEP_IN_MAX, gap) * 14);
+    }
+    const slide = this.lunge.length();
+    this.forward(this.lunge).multiplyScalar(Math.max(slide, lunge));
+    this.prevActiveT = 0;
     this.game.sound.swing(a.heavy);
-    this.prevBladeValid = false;
   }
 
   startRoll(moveDir) {
@@ -483,21 +520,33 @@ export class Knight {
     }
 
     this.hp -= h.damage;
-    this.state = 'stagger';
-    this.stateT = 0;
+    const chest = this.chest();
+    fx.blood(chest, new THREE.Vector3(-dx / d, 0, -dz / d), h.damage < LIGHT_BLOW ? 8 : 14);
+    fx.burst(chest, h.damage < LIGHT_BLOW ? 0.8 : 1.2, new THREE.Color(0xc9412f));
+    fx.hurt();
+    sound.hurt();
+    this.game.hud.hurt();
+    if (this.hp <= 0) { this.die(); return 'hit'; }
+
+    // Light blows (a raider's machete) don't stop a knight in full armour:
+    // mid-swing you shrug them off, otherwise you barely flinch.
+    if (h.damage < LIGHT_BLOW) {
+      fx.shake(0.25);
+      this.game.hitstop(0.04);
+      if (this.state === 'attack' || this.state === 'roll') return 'hit';
+      this.vel.x -= (dx / d) * 2.5; this.vel.z -= (dz / d) * 2.5;
+      this.state = 'stagger';
+      this.stateT = STAGGER_TIME - 0.15;    // a short flinch
+    } else {
+      fx.shake(0.5);
+      this.game.hitstop(0.08);
+      this.vel.x -= (dx / d) * 6; this.vel.z -= (dz / d) * 6;
+      this.state = 'stagger';
+      this.stateT = 0;
+    }
     this.attack = null;
     this.blocking = false;
     this.poseFrom = { ...this.pose };
-    this.vel.x -= (dx / d) * 6; this.vel.z -= (dz / d) * 6;
-    const chest = this.chest();
-    fx.blood(chest, new THREE.Vector3(-dx / d, 0, -dz / d), 14);
-    fx.burst(chest, 1.2, new THREE.Color(0xc9412f));
-    fx.shake(0.5);
-    fx.hurt();
-    sound.hurt();
-    this.game.hitstop(0.08);
-    this.game.hud.hurt();
-    if (this.hp <= 0) this.die();
     return 'hit';
   }
 
@@ -567,7 +616,7 @@ export class Knight {
         if (this.stateT > 0.32) { this.state = 'move'; this.stateT = 0; this.poseFrom = { ...this.pose }; }
         break;
       case 'stagger':
-        if (this.stateT > 0.38) { this.state = 'move'; this.stateT = 0; this.poseFrom = { ...this.pose }; }
+        if (this.stateT > STAGGER_TIME) { this.state = 'move'; this.stateT = 0; this.poseFrom = { ...this.pose }; }
         break;
       case 'dead':
         this.deadT += dt;
@@ -588,8 +637,10 @@ export class Knight {
       this.vel.x *= k; this.vel.z *= k;
     }
     // the lunge forward during a swing
-    this.pos.addScaledVector(this.lunge, dt);
-    this.lunge.multiplyScalar(Math.exp(-dt * 10));
+    // (worked out exactly, so it carries you the same distance at any frame rate)
+    const fade = Math.exp(-dt * 10);
+    this.pos.addScaledVector(this.lunge, (1 - fade) / 10);
+    this.lunge.multiplyScalar(fade);
 
     this.pos.x += this.vel.x * dt;
     this.pos.z += this.vel.z * dt;
@@ -617,9 +668,14 @@ export class Knight {
 
   handleInput(dt, input, move) {
     const can = this.state === 'move';
+    // a click that came while you were flinching or rolling: swing now
+    if (can && this.clickedAt !== undefined && this.game.realTime - this.clickedAt < CLICK_MEMORY) {
+      this.clickedAt = undefined;
+      this.requestLight(move);
+      return;
+    }
     // ---- shield ----
-    const wantBlock = input.mouse.right && (can || this.state === 'charge' && false);
-    if (wantBlock && !this.blocking && can) {
+    if (input.mouse.right && !this.blocking && can) {
       this.blocking = true;
       this.blockPressedAt = this.game.realTime;
     }
@@ -665,6 +721,7 @@ export class Knight {
     if (this.stamina <= 5) return;
     if (this.state === 'move') this.startAttack(1, move);
     else if (this.state === 'attack' && this.attack.n !== 'heavy') this.buffered = true;
+    else this.clickedAt = this.game.realTime;   // remember it: swing as soon as you can
   }
 
   updateAttack(dt, move) {
@@ -675,6 +732,7 @@ export class Knight {
       if (a.heavy && !a.slammed) this.heavyImpact();
       a.phase = 'recover';
       a.t = 0;
+      a.justEnded = true;     // the blade's last bit of movement still gets checked this frame
     } else if (a.phase === 'recover') {
       if (this.buffered && a.t > 0.05 && this.combo < 3 && this.stamina > 5) {
         this.startAttack(this.combo + 1, move);
@@ -778,9 +836,13 @@ export class Knight {
     this.root.updateMatrixWorld(true);
     this.bladeBase.getWorldPosition(this._b1);
     this.bladeTip.getWorldPosition(this._t1);
-    if (st === 'attack' && this.attack.phase === 'active' && dt > 0) {
+    if (st === 'attack' && (this.attack.phase === 'active' || this.attack.justEnded) && dt > 0) {
       const a = this.attack;
-      if (this.prevBladeValid) sweep(this.game, this._b0, this._t0, this._b1, this._t1, a, this);
+      if (this.prevBladeValid) this.sweepSwing(a);
+      if (a.justEnded && this.state === 'attack') {
+        a.justEnded = false;
+        settleSoft(this.game, a, this);
+      }
       this.game.fx.trailPush(this._b1, this._t1, a.heavy ? ICHOR : INK);
     } else if (st === 'attack' && this.attack.phase === 'recover' && this.attack.t < 0.05 && dt > 0) {
       this.game.fx.trailPush(this._b1, this._t1, this.attack.heavy ? ICHOR : INK);
@@ -788,5 +850,44 @@ export class Knight {
     this.prevBladeValid = true;
     this._b0.copy(this._b1);
     this._t0.copy(this._t1);
+    this.prevRoot.copy(this.root.position);
+  }
+
+  /**
+   * Check what the sword passed through since last frame. Rather than just
+   * joining last frame's blade to this frame's with a straight line (which
+   * cuts the corner of the swing's curve when the frame rate is low), we
+   * re-pose the arm at many tiny moments in between - 120 a second - and
+   * check each little piece of the real curved path.
+   */
+  sweepSwing(a) {
+    const tNow = a.justEnded ? a.active : Math.min(a.t, a.active);
+    const t0 = this.prevActiveT;
+    const steps = Math.max(1, Math.ceil((tNow - t0) * 120));
+    const from = POSES[a.from], to = POSES[a.to];
+    const pose = {};
+    const rootNow = this._rootNow.copy(this.root.position);
+    const pb = this._pb.copy(this._b0), pt = this._pt.copy(this._t0);
+    const b = this._sb, t = this._st;
+    for (let i = 1; i <= steps; i++) {
+      const k = i / steps;
+      blend(pose, from, to, easeInOut(Math.min(1, (t0 + (tNow - t0) * k) / a.active)));
+      this.applyPose(pose);
+      this.root.position.lerpVectors(this.prevRoot, rootNow, k);
+      this.root.updateMatrixWorld(true);
+      this.bladeBase.getWorldPosition(b);
+      this.bladeTip.getWorldPosition(t);
+      sweep(this.game, pb, pt, b, t, a, this);
+      if (this.state !== 'attack') break;      // bounced off armour
+      pb.copy(b);
+      pt.copy(t);
+    }
+    this.prevActiveT = tNow;
+    // put the knight back exactly as it should look this frame
+    this.applyPose(this.pose);
+    this.root.position.copy(rootNow);
+    this.root.updateMatrixWorld(true);
+    this.bladeBase.getWorldPosition(this._b1);
+    this.bladeTip.getWorldPosition(this._t1);
   }
 }

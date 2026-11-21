@@ -28,6 +28,7 @@ const KINDS = {
   brute: { hp: 140, walk: 1.8, run: 3.8, radius: 0.55, damage: 26, reach: 2.4, windup: 0.85, rest: [2.0, 3.0], scale: 1.28 },
 };
 
+const MAX_ATTACKERS = 2;   // how many raiders may be swinging at you at the same moment
 const SPAWN_NEAR = 110;    // camps fill up when you get this close
 const DESPAWN_FAR = 150;   // ...and empty when you get this far away
 
@@ -211,15 +212,16 @@ class Person {
     if (this.hostile) {
       const sc = this.def.scale || 1;
       const mk = (parent, x, y, z) => { const o = new THREE.Object3D(); o.position.set(x, y, z); parent.add(o); return o; };
+      // overlapping balls from head to knees, so there are no gaps to slip through
       if (this.kind === 'brute') {
-        this.addPart('helmet', mk(head, 0, 0.1, 0), 0.17 * sc, 'armor');
-        this.addPart('back', mk(torso, 0, 0.3, -0.2), 0.2 * sc, 'weak', { mult: 2.2 });
+        this.addPart('helmet', mk(head, 0, 0.1, 0), 0.18 * sc, 'armor');
+        this.addPart('back', mk(torso, 0, 0.3, -0.22), 0.22 * sc, 'weak', { mult: 2.2 });
       } else {
         this.addPart('head', mk(head, 0, 0.1, 0), 0.15 * sc, 'weak', { mult: 2 });
       }
-      this.addPart('chest', mk(torso, 0, 0.3, 0), 0.24 * sc, 'body', { mult: 1 });
-      this.addPart('belly', mk(hips, 0, 0, 0), 0.22 * sc, 'body', { mult: 1 });
-      this.addPart('legs', mk(this.body, 0, 0.5, 0), 0.2 * sc, 'body', { mult: 0.8 });
+      this.addPart('chest', mk(torso, 0, 0.32, 0.02), 0.3 * sc, 'body', { mult: 1 });
+      this.addPart('belly', mk(hips, 0, 0.02, 0), 0.28 * sc, 'body', { mult: 1 });
+      this.addPart('legs', mk(this.body, 0, 0.5, 0), 0.26 * sc, 'body', { mult: 0.8 });
       this.lockPoint = this.parts[1].obj;
     }
   }
@@ -392,7 +394,8 @@ class Person {
           this.goal = k.pos;
           speed = d > def.reach - 0.2 ? (d > 6 ? def.run : def.walk * 1.5) : 0;
           this.cd -= dt;
-          if (this.cd <= 0 && d < def.reach + 0.3) { this.attackTarget = k; this.setState('windup'); }
+          // they take turns: only a couple at a time swing at you
+          if (this.cd <= 0 && d < def.reach + 0.3 && this.owner.attackersOnKnight() < MAX_ATTACKERS) { this.attackTarget = k; this.setState('windup'); }
         }
         if (d > 40) this.setState('idle');
         break;
@@ -605,6 +608,16 @@ export class Humans {
     if (roaming) p.setState(p.hostile ? 'roam' : 'wander');
     this.list.push(p);
     return p;
+  }
+
+  /** How many raiders are winding up or swinging at the knight right now. */
+  attackersOnKnight() {
+    const k = this.game.knight;
+    let n = 0;
+    for (const p of this.list) {
+      if (p.alive && p.attackTarget === k && (p.state === 'windup' || p.state === 'strike')) n++;
+    }
+    return n;
   }
 
   nearestCivilian(pos, range) {

@@ -39,22 +39,29 @@ export function sweep(game, b0, t0, b1, t1, attack, knight) {
     Math.hypot(a.pos.x - knight.pos.x, a.pos.z - knight.pos.z) < 4 + a.radius * 1.5);
   if (!cands.length) return;
   for (const a of cands) a.updateParts();
-  const SUB = 5, PTS = 7;
+  // The blade counts as a rod BLADE_R thick, a touch longer than the steel,
+  // so a swing that clearly passes through someone on screen always lands.
+  // Weak spots still need a precise hit (WEAK_R), or every hit would be one.
+  const SUB = 6, PTS = 8, BLADE_R = 0.14, WEAK_R = 0.07;
   const base = new THREE.Vector3(), tip = new THREE.Vector3(), pt = new THREE.Vector3();
   for (const a of cands) {
-    let first = null, bestPri = null;
+    let first = null, bestPri = null, soft = null;
     for (let s = 1; s <= SUB; s++) {
       const k = s / SUB;
       base.lerpVectors(b0, b1, k);
       tip.lerpVectors(t0, t1, k);
       for (let i = 0; i < PTS; i++) {
-        pt.lerpVectors(base, tip, 0.1 + (0.9 * i) / (PTS - 1));
+        pt.lerpVectors(base, tip, 0.05 + (1.05 * i) / (PTS - 1));
         for (const p of a.parts) {
           if (p.broken || !p.active()) continue;
           const d = pt.distanceTo(p.wp);
-          if (d > p.r + 0.06) continue;
+          if (d > p.r + (KIND[p.kind].priority ? WEAK_R : BLADE_R)) continue;
           const ratio = d / p.r;
-          if (KIND[p.kind].priority) {
+          if (p.soft) {
+            // "soft" armour (wings out to the side) only counts if the
+            // whole swing touches nothing else: see settleSoft() below
+            if (!soft) soft = { p, ratio, point: pt.clone() };
+          } else if (KIND[p.kind].priority) {
             if (!bestPri || ratio < bestPri.ratio) bestPri = { p, ratio, point: pt.clone() };
           } else if (!first || (first.s === s && ratio < first.ratio)) {
             first = { p, ratio, point: pt.clone(), s };
@@ -63,9 +70,29 @@ export function sweep(game, b0, t0, b1, t1, attack, knight) {
       }
     }
     const hit = bestPri || first;
-    if (!hit) continue;
+    if (!hit) {
+      if (soft) {
+        attack.softHits = attack.softHits || new Map();
+        if (!attack.softHits.has(a)) attack.softHits.set(a, soft);
+      }
+      continue;
+    }
     attack.hit.add(a);
     const result = a.owner.strike(a, hit.p, attack, hit.point, knight);
+    if (result === 'deflect') { knight.deflected(); return; }
+  }
+}
+
+/**
+ * The swing has finished. Anything whose wing the blade touched, but
+ * nothing else of, gets the wing hit now (usually a CLANG).
+ */
+export function settleSoft(game, attack, knight) {
+  if (!attack.softHits) return;
+  for (const [a, h] of attack.softHits) {
+    if (attack.hit.has(a) || !a.hittable()) continue;
+    attack.hit.add(a);
+    const result = a.owner.strike(a, h.p, attack, h.point, knight);
     if (result === 'deflect') { knight.deflected(); return; }
   }
 }

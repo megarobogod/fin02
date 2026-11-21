@@ -207,7 +207,7 @@ class Angel {
         // armour point out toward the wing tip
         const mk = this.marker(side * 1.0 * (tier.small ? 0.6 : 1), tier.down ? -0.35 : 0.3, 0, pivot);
         this.body.add(pivot);
-        this.addPart('wing', mk, tier.small ? 0.22 : 0.3, 'armor');
+        this.addPart('wing', mk, tier.small ? 0.22 : 0.3, 'armor', { soft: true });
         wings.push({ pivot, side, tier: ti, baseY, wrap: !!tier.wrap });
         this.debrisParts.push(pivot);
       }
