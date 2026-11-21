@@ -1,0 +1,792 @@
+// =====================================================
+// knight.js - you
+//
+// The knight is built from boxes on a skeleton of "joints" (empty groups you
+// can rotate). Animation is done by blending between poses: a pose is just a
+// list of joint angles, e.g. "sword raised over the head".
+//
+// Controls (set in main.js):
+//   left click       slash (click again during a swing to chain 3 slashes)
+//   hold left click  charge a heavy overhead slam, release to strike
+//   right click      raise the shield. Raise it just as a blow lands = PARRY
+//   space            roll (you can't be hurt mid-roll)
+// =====================================================
+import * as THREE from 'three';
+import { INK, WHITE, ICHOR } from './fx.js';
+import { lathe, capsule, rbox, plate, bladeGeo } from './shapes.js';
+import { sweep, targets } from './combat.js';
+
+// ---------- tuning numbers ----------
+const WALK = 4.6;
+const SPRINT = 7.6;
+const GUARD_WALK = 2.2;
+const ROLL_SPEED = 10;
+const ROLL_TIME = 0.5;
+const ROLL_COST = 22;
+const PARRY_WINDOW = 0.22;       // seconds after raising the shield that a parry counts
+const HOLD_FOR_HEAVY = 0.26;     // hold the button this long to start charging
+const RADIUS = 0.45;
+
+// The three slashes of the combo, plus the heavy slam.
+// windup/active/recover are in seconds. "from"/"to" name the poses below.
+const ATTACKS = {
+  1: { windup: 0.13, active: 0.13, recover: 0.32, damage: 22, poise: 22, stamina: 12, lunge: 3.0, from: 'S1a', to: 'S1b' },
+  2: { windup: 0.12, active: 0.13, recover: 0.32, damage: 22, poise: 22, stamina: 12, lunge: 3.0, from: 'S2a', to: 'S2b' },
+  3: { windup: 0.2, active: 0.12, recover: 0.42, damage: 36, poise: 45, stamina: 18, lunge: 4.2, from: 'S3a', to: 'S3b' },
+  heavy: { windup: 0, active: 0.13, recover: 0.6, damage: 58, poise: 120, stamina: 28, lunge: 7.0, from: 'Ha', to: 'Hb', heavy: true },
+};
+
+// Joint angles in radians. Everything not listed copies BASE.
+const BASE = {
+  torsoX: 0, torsoY: 0, torsoZ: 0,
+  armRx: -0.35, armRy: 0.05, armRz: 0.1, elbowR: -0.75, wristR: -0.9, wristRy: 0,
+  armLx: -0.3, armLy: -0.9, armLz: 0, elbowL: -1.05, headY: 0,
+};
+const P = (o) => ({ ...BASE, ...o });
+const POSES = {
+  idle: P({}),
+  block: P({ torsoY: -0.3, armLx: -1.0, armLy: -1.3, elbowL: -0.65, armRx: -0.2, wristR: -1.2 }),
+  S1a: P({ torsoY: -0.8, armRx: -1.75, armRy: -1.5, armRz: 0, elbowR: -0.2, wristR: -0.05 }),
+  S1b: P({ torsoY: 0.75, armRx: -1.7, armRy: 1.35, armRz: 0, elbowR: -0.05, wristR: 0.05 }),
+  S2a: P({ torsoY: 0.7, armRx: -1.65, armRy: 1.3, armRz: 0, elbowR: -0.5, wristR: -0.3 }),
+  S2b: P({ torsoY: -0.75, armRx: -1.35, armRy: -1.45, armRz: 0, elbowR: -0.1, wristR: -0.1 }),
+  // the overhead and the slam come down the middle, right onto the heart
+  S3a: P({ torsoX: -0.25, torsoY: 0.1, armRx: -3.0, armRy: 0.3, armRz: 0, elbowR: -0.5, wristR: -0.4 }),
+  S3b: P({ torsoX: 0.35, torsoY: 0.2, armRx: -0.65, armRy: 0.3, armRz: 0, elbowR: -0.05, wristR: -0.15 }),
+  Ha: P({ torsoX: -0.4, torsoY: -0.1, armRx: -3.3, armRy: 0.25, armRz: 0, elbowR: -1.0, wristR: -0.7 }),
+  Hb: P({ torsoX: 0.55, torsoY: 0.2, armRx: -0.45, armRy: 0.3, armRz: 0, elbowR: 0, wristR: -0.05 }),
+  // poses for the angel execution (cinematic.js)
+  crouchArms: P({ torsoX: 0.45, armRx: -0.3, armRy: -0.4, elbowR: -0.6, wristR: -0.4, armLx: -0.5, armLy: -0.6, elbowL: -0.9 }),
+  raise: P({ torsoX: -0.35, armRx: -3.2, armRy: 0.2, elbowR: -0.2, wristR: -0.2, armLx: -2.4, armLy: -0.3, elbowL: -0.6 }),
+  plunge: P({ torsoX: 0.5, armRx: -1.3, armRy: 0.25, elbowR: 0, wristR: 0.5, armLx: -1.2, armLy: -0.5, elbowL: -0.4 }),
+  kneel: P({ torsoX: 0.3, headY: 0, armRx: -0.75, armRy: 0.15, elbowR: -0.35, wristR: 1.1, armLx: -0.55, armLy: -0.25, elbowL: -1.3 }),
+  recoil: P({ torsoX: -0.35, torsoY: -0.4, armRx: -2.2, armRy: -0.9, elbowR: -1.2, wristR: -0.9 }),
+  stagger: P({ torsoX: -0.45, armRx: -0.9, armRy: -0.6, armLx: -0.9, armLy: 0.2, elbowL: -0.4 }),
+};
+
+const ease = (t) => 1 - (1 - t) * (1 - t);
+const easeInOut = (t) => (t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2);
+function blend(out, a, b, t) {
+  for (const k in BASE) out[k] = a[k] + (b[k] - a[k]) * t;
+  return out;
+}
+function angleLerp(a, b, t) {
+  let d = ((b - a + Math.PI) % (Math.PI * 2)) - Math.PI;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return a + d * t;
+}
+
+export class Knight {
+  constructor(game) {
+    this.game = game;
+    this.pos = new THREE.Vector3();
+    this.vel = new THREE.Vector3();
+    this.build();
+    this.reset();
+    this._b0 = new THREE.Vector3(); this._t0 = new THREE.Vector3();
+    this._b1 = new THREE.Vector3(); this._t1 = new THREE.Vector3();
+  }
+
+  reset() {
+    this.pos.copy(this.game.world.spawn);
+    this.pos.y = this.game.world.heightAt(this.pos.x, this.pos.z);
+    this.vel.set(0, 0, 0);
+    this.facing = 0;
+    this.maxHp = 100; this.hp = 100;
+    this.maxStamina = 100; this.stamina = 100; this.staminaDelay = 0;
+    this.state = 'move';        // move | attack | charge | roll | recoil | stagger | dead
+    this.stateT = 0;
+    this.attack = null;
+    this.combo = 0;
+    this.buffered = false;
+    this.blocking = false;
+    this.blockPressedAt = -10;
+    this.invuln = 0;
+    this.lmbHeld = -1;
+    this.walkPhase = 0; this.walkAmt = 0;
+    this.lastStep = 0;
+    this.pose = { ...BASE };
+    this.poseFrom = { ...BASE };
+    this.lunge = new THREE.Vector3();
+    this.rollDir = new THREE.Vector3();
+    this.deadT = 0;
+    this.rollPivot.rotation.set(0, 0, 0);
+    this.root.visible = true;
+  }
+
+  // ================================================================ model
+  build() {
+    const S = this.game.sketch;
+    const STEEL = 0x9a9da2, DARK = 0x5d6066, CLOTH = 0x7d2a22, LEATHER = 0x5a4532, MAIL = 0x7b7d80, PALE = 0xd8cfb8;
+    // put a shape on a joint at (x, y, z), optionally turned
+    const put = (geo, tint, parent, x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0) => {
+      const m = S.part(geo, tint);
+      m.position.set(x, y, z);
+      m.rotation.set(rx, ry, rz);
+      parent.add(m);
+      return m;
+    };
+    const joint = (parent, x, y, z) => {
+      const g = new THREE.Group();
+      g.position.set(x, y, z);
+      g.rotation.order = 'YXZ';
+      parent.add(g);
+      return g;
+    };
+
+    this.root = new THREE.Group();
+    this.game.scene.add(this.root);
+    this.rollPivot = joint(this.root, 0, 0.95, 0);
+    const inner = joint(this.rollPivot, 0, -0.95, 0);
+
+    // ---- body ----
+    const hips = joint(inner, 0, 1.0, 0);
+    this.hips = hips;
+    // mail skirt, flaring out
+    put(lathe([[0.21, 0.08], [0.23, -0.05], [0.27, -0.22], [0.29, -0.3]], 20, 0.8), MAIL, hips);
+    const torso = joint(hips, 0, 0.12, 0);
+    // breastplate: barrel chested, flatter front to back
+    put(lathe([[0.0, -0.06], [0.2, -0.06], [0.23, 0.1], [0.265, 0.3], [0.255, 0.46], [0.19, 0.58], [0.09, 0.62], [0, 0.62]], 22, 0.74), STEEL, torso);
+    // the red tabard over it, front and back, hanging past the belt
+    for (const s of [1, -1]) {
+      put(rbox(0.36, 0.86, 0.025, 0.012), CLOTH, torso, 0, 0.0, s * 0.19);
+    }
+    put(rbox(0.055, 0.38, 0.012, 0.005), PALE, torso, 0, 0.24, 0.205);          // the pale cross
+    put(rbox(0.25, 0.055, 0.012, 0.005), PALE, torso, 0, 0.32, 0.205);
+    // belt with a buckle
+    put(new THREE.TorusGeometry(0.235, 0.03, 8, 28), LEATHER, torso, 0, 0.0, 0, Math.PI / 2, 0, 0).scale.set(1, 0.76, 1);
+    put(rbox(0.07, 0.06, 0.03, 0.01), 0xb39a5c, torso, 0, 0.0, 0.18);
+    // gorget (neck guard)
+    put(lathe([[0.13, 0], [0.12, 0.06], [0.09, 0.1]], 16), DARK, torso, 0, 0.58, 0);
+    // layered pauldrons
+    for (const s of [-1, 1]) {
+      const pa = put(new THREE.SphereGeometry(0.16, 18, 10, 0, Math.PI * 2, 0, Math.PI / 2), STEEL, torso, s * 0.3, 0.5, 0);
+      pa.scale.set(1.15, 0.85, 1.1);
+      pa.rotation.z = -s * 0.35;
+      const pb = put(new THREE.SphereGeometry(0.17, 18, 8, 0, Math.PI * 2, Math.PI / 3, Math.PI / 6), STEEL, torso, s * 0.32, 0.47, 0);
+      pb.scale.set(1.15, 1, 1.1);
+      pb.rotation.z = -s * 0.4;
+    }
+
+    // ---- the great helm ----
+    const head = joint(torso, 0, 0.66, 0);
+    this.headJ = head;
+    put(lathe([[0.0, -0.02], [0.15, -0.02], [0.163, 0.06], [0.168, 0.2], [0.158, 0.28], [0.125, 0.335], [0.06, 0.365], [0.0, 0.37]], 22), STEEL, head);
+    const slit = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.026, 0.05), S.glow(0x15120e));
+    slit.position.set(0, 0.2, 0.15);
+    head.add(slit);
+    for (let i = 0; i < 5; i++) {                                                 // breathing holes
+      const hole = new THREE.Mesh(new THREE.CylinderGeometry(0.009, 0.009, 0.05, 6), S.glow(0x15120e));
+      hole.rotation.x = Math.PI / 2;
+      hole.position.set(0.04 + (i % 2) * 0.03, 0.1 - Math.floor(i / 2) * 0.03, 0.16);
+      head.add(hole);
+    }
+    put(rbox(0.018, 0.3, 0.03, 0.008), DARK, head, 0, 0.17, 0.165);              // nose ridge
+    // a red plume flowing back off the crown
+    const plumeCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(0, 0.36, 0.02), new THREE.Vector3(0, 0.46, -0.08), new THREE.Vector3(0, 0.42, -0.25), new THREE.Vector3(0, 0.25, -0.38),
+    ]);
+    put(new THREE.TubeGeometry(plumeCurve, 16, 0.045, 8), CLOTH, head);
+
+    // ---- arms (both built the same) ----
+    const arm = (side) => {
+      const sh = joint(torso, side * 0.33, 0.52, 0);
+      put(capsule(0.07, 0.32, 0.075), MAIL, sh);
+      const el = joint(sh, 0, -0.32, 0);
+      put(new THREE.SphereGeometry(0.07, 14, 10), STEEL, el);                    // elbow cop
+      put(lathe([[0.062, 0.02], [0.07, -0.05], [0.064, -0.2], [0.055, -0.27]], 16), STEEL, el);
+      put(rbox(0.12, 0.11, 0.13, 0.035), DARK, el, 0, -0.32, 0);                // gauntlet
+      return { sh, el };
+    };
+    const R = arm(-1), L = arm(1);
+    const armR = R.sh, elbowR = R.el, armL = L.sh, elbowL = L.el;
+
+    // ---- the sword ----
+    const wristR = joint(elbowR, 0, -0.34, 0);
+    put(new THREE.CylinderGeometry(0.023, 0.026, 0.22, 10), LEATHER, wristR, 0, 0.02, 0);   // grip
+    put(new THREE.CylinderGeometry(0.045, 0.045, 0.03, 14), DARK, wristR, 0, 0.15, 0, Math.PI / 2);   // wheel pommel
+    // crossguard: a bar that curves slightly toward the blade
+    const guardCurve = new THREE.QuadraticBezierCurve3(new THREE.Vector3(-0.18, -0.08, 0), new THREE.Vector3(0, -0.12, 0), new THREE.Vector3(0.18, -0.08, 0));
+    put(new THREE.TubeGeometry(guardCurve, 12, 0.017, 8), DARK, wristR);
+    put(bladeGeo(1.04, 0.07), 0xe2e4e6, wristR, 0, -0.12, 0);
+    put(rbox(0.012, 0.75, 0.012, 0.004), 0x8f9296, wristR, 0, -0.5, 0.004);      // the fuller (groove)
+    this.bladeBase = new THREE.Object3D(); this.bladeBase.position.y = -0.14; wristR.add(this.bladeBase);
+    this.bladeTip = new THREE.Object3D(); this.bladeTip.position.y = -1.17; wristR.add(this.bladeTip);
+
+    // ---- the shield: a heater with a rim, a boss and a cross ----
+    const shield = new THREE.Group();
+    shield.position.set(0.1, -0.17, 0);
+    shield.rotation.x = Math.PI;          // pointy end toward the elbow
+    elbowL.add(shield);
+    const outline = [];
+    for (let i = 0; i <= 12; i++) {
+      const t = i / 12;
+      outline.push([0.33 * Math.cos(t * Math.PI / 2) ** 0.6, 0.38 - 0.88 * Math.sin(t * Math.PI / 2) ** 1.4]);
+    }
+    // down the right side to the point, then back up the left side
+    const full = [...outline, ...outline.slice(0, -1).reverse().map(([x, y]) => [-x, y])];
+    const face = plate(full, 0.04, 0.012);
+    face.rotateY(Math.PI / 2);
+    put(face, 0x6b2a20, shield);
+    const rimPts = full.map(([x, y]) => [x * 1.06, y * 1.06 + 0.005]);
+    const rim = plate(rimPts, 0.02, 0.008, [full.map(([x, y]) => [x * 0.98, y * 0.98]).reverse()]);
+    rim.rotateY(Math.PI / 2);
+    put(rim, DARK, shield, 0.022, 0, 0);
+    put(rbox(0.018, 0.66, 0.08, 0.008), PALE, shield, 0.03, 0.03, 0);
+    put(rbox(0.018, 0.08, 0.52, 0.008), PALE, shield, 0.03, 0.16, 0);
+    put(new THREE.SphereGeometry(0.06, 14, 10, 0, Math.PI), 0xb39a5c, shield, 0.03, 0.16, 0, 0, Math.PI / 2);
+    this.shield = shield;
+
+    // ---- legs ----
+    this.legs = [];
+    for (const s of [1, -1]) {
+      const hip = joint(inner, s * 0.12, 0.92, 0);
+      put(capsule(0.085, 0.44, 0.1), MAIL, hip);                                  // thigh
+      put(lathe([[0.0, 0.05], [0.09, 0.05], [0.1, -0.08], [0.09, -0.22], [0, -0.22]], 16, 0.8), STEEL, hip, 0, -0.08, 0.02);   // cuisse plate
+      const knee = joint(hip, 0, -0.44, 0);
+      put(new THREE.SphereGeometry(0.075, 14, 10), STEEL, knee, 0, 0, 0.03);      // knee cop
+      put(lathe([[0.065, 0.0], [0.078, -0.08], [0.07, -0.3], [0.055, -0.4]], 16), STEEL, knee);   // greave
+      // sabaton: pointed, segmented steel shoe
+      const shoe = plate([[-0.06, -0.08], [0.06, -0.08], [0.06, 0.12], [0.0, 0.2], [-0.06, 0.12]], 0.07, 0.015);
+      shoe.rotateX(-Math.PI / 2);
+      put(shoe, DARK, knee, 0, -0.43, 0.04);
+      this.legs.push({ hip, knee });
+    }
+
+    // ---- a cape that sways as you move ----
+    const capeGeo = new THREE.PlaneGeometry(0.46, 0.95, 6, 10);
+    capeGeo.translate(0, -0.475, 0);
+    // narrower at the shoulders, with a ragged hem
+    {
+      const p = capeGeo.attributes.position;
+      for (let i = 0; i < p.count; i++) {
+        const k = -p.getY(i) / 0.95;
+        p.setX(i, p.getX(i) * (0.7 + 0.45 * k));
+        if (k > 0.97) p.setY(i, p.getY(i) + Math.sin(p.getX(i) * 40) * 0.05);
+      }
+    }
+    this.capeGeo = capeGeo;
+    this.capeRest = Float32Array.from(capeGeo.attributes.position.array);
+    const cape = new THREE.Mesh(capeGeo, S.fill(0x4a1a15, { side: THREE.DoubleSide }));
+    cape.position.set(0, 0.56, -0.2);
+    torso.add(cape);
+    this.cape = cape;
+    this.capeSwing = 0;
+
+    this.j = { torso, armR, elbowR, wristR, armL, elbowL, head };
+
+    // a soft ink shadow under your feet
+    const shadowTex = this.game.fx.blotTex;
+    this.shadow = new THREE.Mesh(new THREE.CircleGeometry(0.55, 16),
+      new THREE.MeshBasicMaterial({ color: 0x1d1913, transparent: true, opacity: 0.3, depthWrite: false, map: shadowTex }));
+    this.shadow.rotation.x = -Math.PI / 2;
+    this.shadow.renderOrder = 2;
+    this.game.scene.add(this.shadow);
+  }
+
+  // ================================================================ cinematic control
+  /**
+   * Used by cinematic.js instead of update(): blend between two named poses
+   * and put the legs in a named position. crouch lowers the hips.
+   */
+  cine(a, b, t, legs, crouch) {
+    blend(this.pose, POSES[a], POSES[b], t);
+    this.applyPose(this.pose);
+    const [L, R] = this.legs;
+    const LEGS = {
+      stand: [0, 0.08, 0, 0.08],
+      crouch: [-1.1, 1.7, -0.9, 1.5],
+      tuck: [-1.3, 1.8, -0.4, 1.2],
+      kneel: [-1.45, 1.55, 0.4, 2.05],
+    }[legs];
+    L.hip.rotation.x = LEGS[0]; L.knee.rotation.x = LEGS[1];
+    R.hip.rotation.x = LEGS[2]; R.knee.rotation.x = LEGS[3];
+    // lower the whole body (legs included) for a crouch or kneel
+    this.hips.position.y = 1.0;
+    this.rollPivot.rotation.x = 0;
+    this.rollPivot.position.y = 0.95 - crouch;
+  }
+
+  updateCineVisuals(realDt) {
+    this.root.position.copy(this.pos);
+    this.root.rotation.y = this.facing;
+    const g = this.game.world.heightAt(this.pos.x, this.pos.z);
+    this.shadow.position.set(this.pos.x, g + 0.03, this.pos.z);
+    this.shadow.scale.setScalar(Math.max(0.3, 1 - (this.pos.y - g) * 0.25));
+    this.updateCape(realDt);
+  }
+
+  /** The cape streams out behind you when you move, and ripples. */
+  updateCape(dt) {
+    const fwd = Math.sin(this.facing) * this.vel.x + Math.cos(this.facing) * this.vel.z;
+    const target = Math.min(1.4, Math.max(0, fwd / 6)) + (this.state === 'roll' ? 0.8 : 0) + (this.capeLift || 0);
+    this.capeSwing += (target - this.capeSwing) * Math.min(1, dt * 6 + (dt === 0 ? 0 : 0.02));
+    const t0 = this.game.realTime;
+    const p = this.capeGeo.attributes.position;
+    const rest = this.capeRest;
+    for (let i = 0; i < p.count; i++) {
+      const y = rest[i * 3 + 1];
+      const x = rest[i * 3];
+      const k = -y / 0.95;                          // 0 at the shoulders, 1 at the hem
+      const lift = k * k * (0.12 + this.capeSwing * 0.55);
+      const ripple = Math.sin(t0 * (3 + this.capeSwing * 5) + k * 5 + x * 4) * 0.035 * k * (0.5 + this.capeSwing);
+      p.setZ(i, -lift - ripple);
+      p.setY(i, y + lift * 0.45 * this.capeSwing);
+    }
+    p.needsUpdate = true;
+    this.capeGeo.computeVertexNormals();
+  }
+
+  applyPose(p) {
+    const j = this.j;
+    j.torso.rotation.set(p.torsoX, p.torsoY, p.torsoZ);
+    j.armR.rotation.set(p.armRx, p.armRy, p.armRz);
+    j.elbowR.rotation.x = p.elbowR;
+    j.wristR.rotation.set(p.wristR, p.wristRy, 0);
+    j.armL.rotation.set(p.armLx, p.armLy, p.armLz);
+    j.elbowL.rotation.x = p.elbowL;
+    j.head.rotation.y = p.headY;
+  }
+
+  // ================================================================ helpers
+  forward(out = new THREE.Vector3()) { return out.set(Math.sin(this.facing), 0, Math.cos(this.facing)); }
+  chest(out = new THREE.Vector3()) { return out.set(this.pos.x, this.pos.y + 1.3, this.pos.z); }
+  get alive() { return this.state !== 'dead'; }
+
+  spend(n) {
+    this.stamina -= n;
+    this.staminaDelay = 0.7;
+  }
+
+  /** Who should an attack turn towards? The locked target, or an enemy just in front. */
+  aimTarget(moveDir) {
+    const lock = this.game.rig.lock;
+    if (lock && lock.alive) return lock;
+    const fwd = moveDir.lengthSq() > 0.01 ? moveDir : this.forward(new THREE.Vector3());
+    let best = null, bestScore = Infinity;
+    for (const a of targets(this.game)) {
+      const dx = a.pos.x - this.pos.x, dz = a.pos.z - this.pos.z;
+      const d = Math.hypot(dx, dz);
+      if (d > 4.5) continue;
+      const dot = (dx * fwd.x + dz * fwd.z) / (d || 1);
+      if (dot < 0.35) continue;
+      const score = d * (2 - dot);
+      if (score < bestScore) { bestScore = score; best = a; }
+    }
+    return best;
+  }
+
+  // ================================================================ actions
+  startAttack(n, moveDir) {
+    const a = ATTACKS[n];
+    this.state = 'attack';
+    this.stateT = 0;
+    this.combo = n === 'heavy' ? 0 : n;
+    this.buffered = false;
+    this.attack = { ...a, n, phase: a.windup > 0 ? 'windup' : 'active', t: 0, hit: new Set(), slammed: false };
+    this.poseFrom = { ...this.pose };
+    this.spend(a.stamina);
+    const t = this.aimTarget(moveDir);
+    if (t) this.facing = Math.atan2(t.pos.x - this.pos.x, t.pos.z - this.pos.z);
+    else if (moveDir.lengthSq() > 0.01) this.facing = Math.atan2(moveDir.x, moveDir.z);
+    this.game.angels.onKnightAttack(this);
+    if (a.windup === 0) this.beginActive();
+  }
+
+  beginActive() {
+    const a = this.attack;
+    a.phase = 'active';
+    a.t = 0;
+    this.forward(this.lunge).multiplyScalar(a.lunge);
+    this.game.sound.swing(a.heavy);
+    this.prevBladeValid = false;
+  }
+
+  startRoll(moveDir) {
+    this.state = 'roll';
+    this.stateT = 0;
+    this.attack = null;
+    this.spend(ROLL_COST);
+    if (moveDir.lengthSq() > 0.01) this.rollDir.copy(moveDir).normalize();
+    else this.forward(this.rollDir).multiplyScalar(-1);
+    this.facing = Math.atan2(this.rollDir.x, this.rollDir.z);
+    this.invuln = 0.38;
+    this.game.sound.roll();
+  }
+
+  /** The sword bounced off armour: you're thrown back for a moment. */
+  deflected() {
+    if (this.state !== 'attack') return;
+    this.state = 'recoil';
+    this.stateT = 0;
+    this.attack = null;
+    this.poseFrom = { ...this.pose };
+    this.lunge.set(0, 0, 0);
+    this.forward(this.vel).multiplyScalar(-2.5);
+    this.spend(6);
+  }
+
+  /**
+   * Something hit you. Returns what happened:
+   * 'dodged' | 'parried' | 'blocked' | 'guardbreak' | 'hit'
+   */
+  takeHit(h) {
+    if (this.state === 'dead') return 'none';
+    if (this.invuln > 0) return 'dodged';
+    const fx = this.game.fx, sound = this.game.sound;
+    const dx = h.from.x - this.pos.x, dz = h.from.z - this.pos.z;
+    const d = Math.hypot(dx, dz) || 1;
+    const fwd = this.forward(new THREE.Vector3());
+    const inFront = (dx * fwd.x + dz * fwd.z) / d > 0.2;
+    const shieldPos = this.shield.getWorldPosition(new THREE.Vector3());
+
+    if (this.blocking && inFront && h.blockable !== false) {
+      if (h.parryable && this.game.realTime - this.blockPressedAt < PARRY_WINDOW) {
+        sound.parry();
+        fx.sparks(shieldPos, 18, INK);
+        fx.sparks(shieldPos, 8, ICHOR);
+        fx.burst(shieldPos, 2.0, WHITE);
+        fx.word('PARRY!', shieldPos, '#f0b43c', 1.3);
+        fx.impactFrame(0.07, 0.35);
+        fx.shake(0.35);
+        this.game.hitstop(0.16);
+        this.game.slowmo(0.35, 0.45);
+        this.game.hud.firstTime('parried', 'Parried! Strike while it reels.');
+        return 'parried';
+      }
+      this.spend(h.damage * 1.6);
+      this.staminaDelay = 0.9;
+      this.vel.x -= (dx / d) * 4; this.vel.z -= (dz / d) * 4;
+      if (this.stamina < 0) {
+        this.stamina = 0;
+        this.hp -= h.damage * 0.4;
+        this.state = 'stagger';
+        this.stateT = -0.5;          // a long stagger
+        this.blocking = false;
+        this.poseFrom = { ...this.pose };
+        sound.guardBreak();
+        fx.sparks(shieldPos, 20, INK);
+        fx.word('BROKEN', shieldPos, '#c9412f', 1);
+        fx.shake(0.5);
+        this.game.hitstop(0.1);
+        if (this.hp <= 0) this.die();
+        return 'guardbreak';
+      }
+      this.hp -= h.damage * 0.08;
+      sound.block();
+      fx.sparks(shieldPos, 12, INK);
+      fx.burst(shieldPos, 1.0, WHITE);
+      fx.shake(0.2);
+      this.game.hitstop(0.05);
+      if (this.hp <= 0) this.die();
+      return 'blocked';
+    }
+
+    this.hp -= h.damage;
+    this.state = 'stagger';
+    this.stateT = 0;
+    this.attack = null;
+    this.blocking = false;
+    this.poseFrom = { ...this.pose };
+    this.vel.x -= (dx / d) * 6; this.vel.z -= (dz / d) * 6;
+    const chest = this.chest();
+    fx.blood(chest, new THREE.Vector3(-dx / d, 0, -dz / d), 14);
+    fx.burst(chest, 1.2, new THREE.Color(0xc9412f));
+    fx.shake(0.5);
+    fx.hurt();
+    sound.hurt();
+    this.game.hitstop(0.08);
+    this.game.hud.hurt();
+    if (this.hp <= 0) this.die();
+    return 'hit';
+  }
+
+  die() {
+    this.hp = 0;
+    this.state = 'dead';
+    this.stateT = 0;
+    this.attack = null;
+    this.blocking = false;
+    this.game.sound.death();
+    this.game.slowmo(0.3, 1.2);
+    this.game.onKnightDeath();
+  }
+
+  heal(n) {
+    this.hp = Math.min(this.maxHp, this.hp + n);
+  }
+
+  // ================================================================ update
+  update(dt, input) {
+    if (dt <= 0) { this.updateVisuals(0); return; }
+    const game = this.game;
+    this.stateT += dt;
+    this.invuln -= dt;
+
+    // stamina comes back after a short pause
+    this.staminaDelay -= dt;
+    if (this.staminaDelay <= 0) this.stamina = Math.min(this.maxStamina, this.stamina + (this.blocking ? 14 : 34) * dt);
+
+    // which way is "forward" for the keys? the way the camera faces
+    const rig = game.rig;
+    const f = rig.forward(new THREE.Vector3()), r = rig.right(new THREE.Vector3());
+    const ix = (input.key('KeyD') ? 1 : 0) - (input.key('KeyA') ? 1 : 0);
+    const iz = (input.key('KeyW') ? 1 : 0) - (input.key('KeyS') ? 1 : 0);
+    const move = new THREE.Vector3().addScaledVector(f, iz).addScaledVector(r, ix);
+    if (move.lengthSq() > 1) move.normalize();
+
+    if (this.state !== 'dead') this.handleInput(dt, input, move);
+
+    // ---------------- state machine ----------------
+    let speed = 0;
+    let turnTo = null;
+    const lock = rig.lock;
+    switch (this.state) {
+      case 'move': {
+        const sprint = input.key('ShiftLeft') || input.key('ShiftRight');
+        speed = this.blocking ? GUARD_WALK : sprint ? SPRINT : WALK;
+        if (lock && lock.alive && !sprint) turnTo = Math.atan2(lock.pos.x - this.pos.x, lock.pos.z - this.pos.z);
+        else if (move.lengthSq() > 0.01) turnTo = Math.atan2(move.x, move.z);
+        break;
+      }
+      case 'charge':
+        speed = 1.0;
+        if (lock && lock.alive) turnTo = Math.atan2(lock.pos.x - this.pos.x, lock.pos.z - this.pos.z);
+        else if (move.lengthSq() > 0.01) turnTo = Math.atan2(move.x, move.z);
+        break;
+      case 'attack':
+        this.updateAttack(dt, move);
+        break;
+      case 'roll': {
+        const k = this.stateT / ROLL_TIME;
+        this.vel.copy(this.rollDir).multiplyScalar(ROLL_SPEED * (1 - k * 0.7));
+        if (k >= 1) { this.state = 'move'; this.stateT = 0; }
+        break;
+      }
+      case 'recoil':
+        if (this.stateT > 0.32) { this.state = 'move'; this.stateT = 0; this.poseFrom = { ...this.pose }; }
+        break;
+      case 'stagger':
+        if (this.stateT > 0.38) { this.state = 'move'; this.stateT = 0; this.poseFrom = { ...this.pose }; }
+        break;
+      case 'dead':
+        this.deadT += dt;
+        break;
+    }
+
+    if (turnTo !== null) this.facing = angleLerp(this.facing, turnTo, 1 - Math.exp(-dt * 12));
+
+    // ---------------- movement ----------------
+    if (this.state === 'move' || this.state === 'charge') {
+      const tx = move.x * speed, tz = move.z * speed;
+      const accel = move.lengthSq() > 0.01 ? 12 : 14;
+      const k = 1 - Math.exp(-dt * accel);
+      this.vel.x += (tx - this.vel.x) * k;
+      this.vel.z += (tz - this.vel.z) * k;
+    } else if (this.state !== 'roll') {
+      const k = Math.exp(-dt * 8);
+      this.vel.x *= k; this.vel.z *= k;
+    }
+    // the lunge forward during a swing
+    this.pos.addScaledVector(this.lunge, dt);
+    this.lunge.multiplyScalar(Math.exp(-dt * 10));
+
+    this.pos.x += this.vel.x * dt;
+    this.pos.z += this.vel.z * dt;
+    game.world.resolveCircle(this.pos, RADIUS);
+    const lim = game.world.limit;
+    this.pos.x = Math.max(-lim, Math.min(lim, this.pos.x));
+    this.pos.z = Math.max(-lim, Math.min(lim, this.pos.z));
+    this.pos.y = game.world.heightAt(this.pos.x, this.pos.z);
+
+    // footsteps
+    const hs = Math.hypot(this.vel.x, this.vel.z);
+    this.walkAmt += ((this.state === 'move' || this.state === 'charge' ? Math.min(1, hs / WALK) : 0) - this.walkAmt) * Math.min(1, dt * 10);
+    this.walkPhase += dt * (2.5 + hs * 1.55);
+    const step = Math.floor(this.walkPhase / Math.PI);
+    if (step !== this.lastStep) {
+      this.lastStep = step;
+      if (this.walkAmt > 0.3 && this.state === 'move') {
+        game.sound.step();
+        if (hs > 6) game.fx.dust(this.pos, 2, 0.4);
+      }
+    }
+
+    this.updateVisuals(dt);
+  }
+
+  handleInput(dt, input, move) {
+    const can = this.state === 'move';
+    // ---- shield ----
+    const wantBlock = input.mouse.right && (can || this.state === 'charge' && false);
+    if (wantBlock && !this.blocking && can) {
+      this.blocking = true;
+      this.blockPressedAt = this.game.realTime;
+    }
+    if (!input.mouse.right || !can) this.blocking = false;
+
+    // ---- roll ----
+    if (input.pressed('Space') && this.stamina > 5) {
+      const lateRecover = this.state === 'attack' && this.attack.phase === 'recover' && this.attack.t > 0.08;
+      if (can || lateRecover || this.state === 'charge') {
+        this.lmbHeld = -1;
+        this.startRoll(move);
+        return;
+      }
+    }
+
+    // ---- sword: click = slash, hold = heavy ----
+    if (input.mouse.leftPressed) this.lmbHeld = 0;
+    if (this.lmbHeld >= 0 && input.mouse.left) {
+      this.lmbHeld += dt;
+      if (this.lmbHeld >= HOLD_FOR_HEAVY && can && this.stamina > 5) {
+        this.state = 'charge';
+        this.stateT = 0;
+        this.blocking = false;
+        this.poseFrom = { ...this.pose };
+        this.lmbHeld = -2;      // now charging
+        this.game.sound.telegraph();
+      }
+    }
+    if (input.mouse.leftReleased) {
+      if (this.state === 'charge') {
+        const power = Math.min(1, this.stateT / 0.6);
+        this.startAttack('heavy', move);
+        this.attack.damage *= 0.7 + power * 0.5;
+        this.attack.power = power;
+      } else if (this.lmbHeld >= 0 && this.lmbHeld < HOLD_FOR_HEAVY) {
+        this.requestLight(move);
+      }
+      this.lmbHeld = -1;
+    }
+  }
+
+  requestLight(move) {
+    if (this.stamina <= 5) return;
+    if (this.state === 'move') this.startAttack(1, move);
+    else if (this.state === 'attack' && this.attack.n !== 'heavy') this.buffered = true;
+  }
+
+  updateAttack(dt, move) {
+    const a = this.attack;
+    a.t += dt;
+    if (a.phase === 'windup' && a.t >= a.windup) this.beginActive();
+    else if (a.phase === 'active' && a.t >= a.active) {
+      if (a.heavy && !a.slammed) this.heavyImpact();
+      a.phase = 'recover';
+      a.t = 0;
+    } else if (a.phase === 'recover') {
+      if (this.buffered && a.t > 0.05 && this.combo < 3 && this.stamina > 5) {
+        this.startAttack(this.combo + 1, move);
+        return;
+      }
+      if (a.t >= a.recover) {
+        this.state = 'move';
+        this.stateT = 0;
+        this.attack = null;
+        this.poseFrom = { ...this.pose };
+      }
+    }
+  }
+
+  /** The heavy slam hitting the ground: a shockwave knocks everything back. */
+  heavyImpact() {
+    const a = this.attack;
+    a.slammed = true;
+    const game = this.game, fx = game.fx;
+    const tip = this.bladeTip.getWorldPosition(new THREE.Vector3());
+    const p = new THREE.Vector3(tip.x, game.world.heightAt(tip.x, tip.z), tip.z);
+    fx.crack(p.x, p.z, 3.2 + (a.power || 0) * 1.5);
+    fx.dust(p, 16, 1.6);
+    fx.shards(p, 10, new THREE.Color(0x9b9282), 0.8);
+    fx.ring(p.x, p.z, { color: 0x1d1913, speed: 22, max: 5, lift: 0.1 });
+    fx.shake(0.55 + (a.power || 0) * 0.2);
+    fx.speedLines = Math.max(fx.speedLines, 0.12);
+    game.sound.slam();
+    game.hitstop(0.07);
+    game.angels.shockwave(p, 3.6, 12 + (a.power || 0) * 14, this);
+    game.humans.shockwave(p, 3.6, 20 + (a.power || 0) * 20);
+  }
+
+  // ================================================================ animation
+  updateVisuals(dt) {
+    const target = {};
+    const st = this.state;
+    if (st === 'attack') {
+      const a = this.attack;
+      const from = POSES[a.from], to = POSES[a.to];
+      if (a.phase === 'windup') blend(target, this.poseFrom, from, ease(Math.min(1, a.t / a.windup)));
+      else if (a.phase === 'active') blend(target, from, to, easeInOut(Math.min(1, a.t / a.active)));
+      else blend(target, to, POSES.idle, ease(Math.min(1, a.t / a.recover)));
+      Object.assign(this.pose, target);
+    } else if (st === 'charge') {
+      blend(target, this.poseFrom, POSES.Ha, ease(Math.min(1, this.stateT / 0.25)));
+      const tremble = Math.min(1, this.stateT / 0.6) * 0.04;
+      target.armRx += (Math.random() - 0.5) * tremble;
+      target.torsoY += (Math.random() - 0.5) * tremble;
+      Object.assign(this.pose, target);
+    } else if (st === 'recoil') {
+      blend(target, POSES.recoil, POSES.idle, ease(Math.min(1, this.stateT / 0.32)));
+      Object.assign(this.pose, target);
+    } else if (st === 'stagger' || st === 'dead') {
+      blend(target, POSES.stagger, POSES.idle, st === 'dead' ? 0 : ease(Math.max(0, Math.min(1, this.stateT / 0.38))));
+      Object.assign(this.pose, target);
+    } else {
+      const goal = this.blocking ? POSES.block : POSES.idle;
+      const k = dt > 0 ? 1 - Math.exp(-dt * (this.blocking ? 22 : 10)) : 0;
+      blend(this.pose, this.pose, goal, k);
+      // arms swing a little when walking
+      const sw = Math.sin(this.walkPhase) * this.walkAmt;
+      this.pose.armRx = this.pose.armRx + sw * 0.05;
+      this.pose.torsoY = this.pose.torsoY + sw * 0.06;
+    }
+    this.applyPose(this.pose);
+
+    // legs: walking cycle, attack stance or a tuck while rolling
+    const [L, R] = this.legs;
+    const s = Math.sin(this.walkPhase) * this.walkAmt;
+    let stance = 0;
+    if (st === 'attack' || st === 'charge') stance = 1;
+    L.hip.rotation.x = -s * 0.7 - stance * 0.35;
+    R.hip.rotation.x = s * 0.7 + stance * 0.3;
+    L.knee.rotation.x = Math.max(0, Math.sin(this.walkPhase + 1.4)) * 0.9 * this.walkAmt + 0.08 + stance * 0.25;
+    R.knee.rotation.x = Math.max(0, Math.sin(this.walkPhase + 1.4 + Math.PI)) * 0.9 * this.walkAmt + 0.08 + stance * 0.35;
+    this.hips.position.y = 1.0 - Math.abs(Math.cos(this.walkPhase)) * 0.05 * this.walkAmt - stance * 0.06 - (this.blocking ? 0.05 : 0);
+
+    // roll: a full forward tumble; dead: fall over backwards
+    if (st === 'roll') {
+      const k = Math.min(1, this.stateT / ROLL_TIME);
+      this.rollPivot.rotation.x = easeInOut(k) * Math.PI * 2;
+      this.rollPivot.position.y = 0.95 - Math.sin(k * Math.PI) * 0.45;
+      L.knee.rotation.x = R.knee.rotation.x = 1.8;
+      L.hip.rotation.x = R.hip.rotation.x = -1.4;
+    } else if (st === 'dead') {
+      const k = Math.min(1, this.deadT / 0.7);
+      this.rollPivot.rotation.x = -easeInOut(k) * Math.PI / 2;
+      this.rollPivot.position.y = 0.95 - k * 0.72;
+    } else {
+      this.rollPivot.rotation.x = 0;
+      this.rollPivot.position.y = 0.95;
+    }
+
+    this.root.position.copy(this.pos);
+    this.root.rotation.y = this.facing;
+    this.shadow.position.set(this.pos.x, this.pos.y + 0.03, this.pos.z);
+    this.updateCape(dt);
+
+    // ---------------- the blade: trail and hits ----------------
+    this.root.updateMatrixWorld(true);
+    this.bladeBase.getWorldPosition(this._b1);
+    this.bladeTip.getWorldPosition(this._t1);
+    if (st === 'attack' && this.attack.phase === 'active' && dt > 0) {
+      const a = this.attack;
+      if (this.prevBladeValid) sweep(this.game, this._b0, this._t0, this._b1, this._t1, a, this);
+      this.game.fx.trailPush(this._b1, this._t1, a.heavy ? ICHOR : INK);
+    } else if (st === 'attack' && this.attack.phase === 'recover' && this.attack.t < 0.05 && dt > 0) {
+      this.game.fx.trailPush(this._b1, this._t1, this.attack.heavy ? ICHOR : INK);
+    }
+    this.prevBladeValid = true;
+    this._b0.copy(this._b1);
+    this._t0.copy(this._t1);
+  }
+}

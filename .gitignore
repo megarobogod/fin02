@@ -1,0 +1,3 @@
+# Vercel's local link to the project (made by the "vercel deploy" command)
+.vercel
+node_modules
