@@ -26,7 +26,10 @@ const ROLL_COST = 22;
 const PARRY_WINDOW = 0.22;       // seconds after raising the shield that a parry counts
 const HOLD_FOR_HEAVY = 0.26;     // hold the button this long to start charging
 const RADIUS = 0.45;
-const STAGGER_TIME = 0.38;       // how long a proper hit knocks you off balance
+const MAX_RESOLVE = 3;           // charges of "steel your will"
+const STEEL_TIME = 1.6;          // how long you kneel to heal
+const STEEL_HEAL = 45;           // willpower it gives back
+const STAGGER_TIME = 0.38;      // how long a proper hit knocks you off balance
 const LIGHT_BLOW = 20;           // hits weaker than this don't interrupt your swing
 const CLICK_MEMORY = 0.4;        // a click this long before you can act still counts
 const AIM_RANGE = 5;             // swings turn toward an enemy this close
@@ -106,7 +109,8 @@ export class Knight {
     this.pos.y = this.game.world.heightAt(this.pos.x, this.pos.z);
     this.vel.set(0, 0, 0);
     this.facing = 0;
-    this.maxHp = 100; this.hp = 100;
+    this.maxHp = 100; this.hp = 100;         // hp is your WILLPOWER
+    this.resolve = MAX_RESOLVE;              // charges for steeling your will (F)
     this.maxStamina = 100; this.stamina = 100; this.staminaDelay = 0;
     this.state = 'move';        // move | attack | charge | roll | recoil | stagger | dead
     this.stateT = 0;
@@ -565,6 +569,42 @@ export class Knight {
     this.hp = Math.min(this.maxHp, this.hp + n);
   }
 
+  /** Get back charges of resolve (saving survivors, resting at their fires). */
+  addResolve(n) {
+    const before = this.resolve;
+    this.resolve = Math.min(MAX_RESOLVE, this.resolve + n);
+    if (this.resolve > before) this.game.hud.resolveFlash();
+  }
+
+  /**
+   * STEEL YOUR WILL: kneel, plant your sword and gather yourself. Takes a
+   * moment, and any blow that lands breaks your focus (the charge isn't
+   * used up if that happens). Finish it and your willpower comes back.
+   */
+  startSteel() {
+    this.state = 'steel';
+    this.stateT = 0;
+    this.attack = null;
+    this.blocking = false;
+    this.poseFrom = { ...this.pose };
+    this.game.sound.choir(1.25);
+    this.game.hud.firstTime('steel', 'Hold still... a blow now would break your focus.');
+  }
+
+  finishSteel() {
+    const fx = this.game.fx;
+    this.resolve--;
+    this.heal(STEEL_HEAL);
+    this.state = 'move';
+    this.stateT = 0;
+    this.poseFrom = { ...this.pose };
+    const c = this.chest();
+    fx.burst(c, 1.6, ICHOR);
+    fx.word('RESOLVE', c, '#f0b43c', 1);
+    fx.ring(this.pos.x, this.pos.z, { speed: 9, max: 4, lift: 0.1 });
+    this.game.sound.haloSnap();
+  }
+
   // ================================================================ update
   update(dt, input) {
     if (dt <= 0) { this.updateVisuals(0); return; }
@@ -610,6 +650,18 @@ export class Knight {
         const k = this.stateT / ROLL_TIME;
         this.vel.copy(this.rollDir).multiplyScalar(ROLL_SPEED * (1 - k * 0.7));
         if (k >= 1) { this.state = 'move'; this.stateT = 0; }
+        break;
+      }
+      case 'steel': {
+        // gold motes rise around you as you gather yourself
+        this.moteT = (this.moteT || 0) - dt;
+        if (this.moteT <= 0) {
+          this.moteT = 0.05;
+          const a = Math.random() * Math.PI * 2, r = 0.5 + Math.random() * 0.6;
+          game.fx.particle({ x: this.pos.x + Math.cos(a) * r, y: this.pos.y + 0.1, z: this.pos.z + Math.sin(a) * r,
+            vy: 1.2 + Math.random(), size: 0.1 + Math.random() * 0.08, frame: 3, color: ICHOR, life: 1, grav: -0.5, drag: 1 });
+        }
+        if (this.stateT >= STEEL_TIME) this.finishSteel();
         break;
       }
       case 'recoil':
@@ -680,6 +732,13 @@ export class Knight {
       this.blockPressedAt = this.game.realTime;
     }
     if (!input.mouse.right || !can) this.blocking = false;
+
+    // ---- steel your will (heal) ----
+    if (input.pressed('KeyF') && can) {
+      if (this.resolve <= 0) this.game.hud.hint('No resolve left. Save survivors, or rest by their fires.', 3);
+      else if (this.hp >= this.maxHp) this.game.hud.hint('Your will is already unbroken.', 2);
+      else { this.startSteel(); return; }
+    }
 
     // ---- roll ----
     if (input.pressed('Space') && this.stamina > 5) {
@@ -786,6 +845,11 @@ export class Knight {
     } else if (st === 'recoil') {
       blend(target, POSES.recoil, POSES.idle, ease(Math.min(1, this.stateT / 0.32)));
       Object.assign(this.pose, target);
+    } else if (st === 'steel') {
+      blend(target, this.poseFrom, POSES.kneel, ease(Math.min(1, this.stateT / 0.35)));
+      target.headY = 0;
+      target.torsoX += Math.sin(this.stateT * 2) * 0.03;      // slow breathing
+      Object.assign(this.pose, target);
     } else if (st === 'stagger' || st === 'dead') {
       blend(target, POSES.stagger, POSES.idle, st === 'dead' ? 0 : ease(Math.max(0, Math.min(1, this.stateT / 0.38))));
       Object.assign(this.pose, target);
@@ -818,6 +882,13 @@ export class Knight {
       this.rollPivot.position.y = 0.95 - Math.sin(k * Math.PI) * 0.45;
       L.knee.rotation.x = R.knee.rotation.x = 1.8;
       L.hip.rotation.x = R.hip.rotation.x = -1.4;
+    } else if (st === 'steel') {
+      // down on one knee
+      const k = ease(Math.min(1, this.stateT / 0.35));
+      this.rollPivot.rotation.x = 0;
+      this.rollPivot.position.y = 0.95 - 0.45 * k;
+      L.hip.rotation.x = -1.45 * k; L.knee.rotation.x = 1.55 * k;
+      R.hip.rotation.x = 0.4 * k; R.knee.rotation.x = 2.05 * k;
     } else if (st === 'dead') {
       const k = Math.min(1, this.deadT / 0.7);
       this.rollPivot.rotation.x = -easeInOut(k) * Math.PI / 2;

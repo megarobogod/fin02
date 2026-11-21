@@ -797,7 +797,8 @@ export class Humans {
         c.setState('thank');
         c.bark(pick(['BLESS YOU!', 'THANK YOU!', 'A KNIGHT!']));
         if (Math.hypot(c.pos.x - game.knight.pos.x, c.pos.z - game.knight.pos.z) < 18) game.knight.heal(8);
-        game.hud.firstTime('saved', 'You saved them. Survivors you rescue will patch up your wounds.');
+        game.knight.addResolve(1);
+        game.hud.firstTime('saved', 'You saved them. Their thanks steadies you: +1 resolve.');
       }
     } else {
       this.lost++;
@@ -833,6 +834,18 @@ export class Humans {
         }
       }
     }
+    // rest by a survivors' fire (with no raiders about) to get all your resolve back
+    for (const c of this.camps) {
+      if (c.type !== 'civilian' || !c.spawned || game.time < (c.restedAt || -1e9) + 60) continue;
+      if (Math.hypot(c.x - k.pos.x, c.z - k.pos.z) > 6) continue;
+      const danger = this.list.some((p) => p.hostile && p.alive && Math.hypot(p.pos.x - k.pos.x, p.pos.z - k.pos.z) < 25);
+      if (danger || !c.members.some((p) => p.alive)) continue;
+      c.restedAt = game.time;
+      k.addResolve(3);
+      k.heal(20);
+      game.hud.hint('You rest by the survivors\' fire. Your resolve returns.', 4);
+    }
+
     // roaming gangs and lone survivors out on the streets
     this.roamT -= dt;
     if (this.roamT <= 0) {

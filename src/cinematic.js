@@ -290,6 +290,7 @@ export class Cinematic {
     k.invuln = 0.5;
     k.capeLift = 0;
     k.hp = k.maxHp;
+    k.addResolve(3);
     k.stamina = k.maxStamina;
     k.pos.copy(this.landAt);
     k.poseFrom = { ...k.pose };

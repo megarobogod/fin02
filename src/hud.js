@@ -13,6 +13,7 @@ export class HUD {
     const $ = (id) => document.getElementById(id);
     this.el = {
       hud: $('hud'), hpFill: $('hp-fill'), hpGhost: $('hp-ghost'), stFill: $('st-fill'),
+      resolve: $('resolve'),
       saved: $('saved-num'), slain: $('slain-num'), unmade: $('unmade-num'),
       boss: $('boss'), bossName: $('boss-name'), bossFill: $('boss-fill'),
       banner: $('banner'), bannerBig: document.querySelector('#banner .big'), bannerSmall: document.querySelector('#banner .small'),
@@ -54,6 +55,14 @@ export class HUD {
     this.el.vitals.classList.add('shake');
   }
 
+  /** Make the resolve diamonds pop (you just got some back). */
+  resolveFlash() {
+    const el = this.el.resolve;
+    el.classList.remove('flash');
+    void el.offsetWidth;
+    el.classList.add('flash');
+  }
+
   /** Show (or hide, with null) the health bar of the angel you're facing. */
   boss(angel) {
     this.bossAngel = angel;
@@ -80,6 +89,16 @@ export class HUD {
     this.el.hpFill.style.transform = `scaleX(${hp})`;
     this.el.hpGhost.style.transform = `scaleX(${this.ghost})`;
     this.el.stFill.style.transform = `scaleX(${Math.max(0, k.stamina / k.maxStamina)})`;
+    // one diamond per charge of resolve: gold if you have it, hollow if spent
+    if (this.shownResolve !== k.resolve) {
+      this.shownResolve = k.resolve;
+      this.el.resolve.innerHTML = '';
+      for (let i = 0; i < 3; i++) {
+        const d = document.createElement('i');
+        if (i >= k.resolve) d.className = 'spent';
+        this.el.resolve.appendChild(d);
+      }
+    }
     const h = this.game.humans;
     this.el.saved.textContent = h.saved;
     this.el.slain.textContent = h.slain;

@@ -49,6 +49,15 @@
     80% { transform: translate(2px, 0); }
   }
   .bar-label { font-family: "Permanent Marker", cursive; font-size: 16px; letter-spacing: .12em; }
+  /* resolve charges: little gold diamonds after the word Willpower */
+  #resolve { display: inline-flex; gap: 6px; margin-left: 10px; vertical-align: middle; }
+  #resolve i {
+    width: 12px; height: 12px; transform: rotate(45deg);
+    border: 2px solid var(--ink); background: var(--gold); display: inline-block;
+  }
+  #resolve i.spent { background: transparent; }
+  #resolve.flash i { animation: pop .5s; }
+  @keyframes pop { 50% { transform: rotate(45deg) scale(1.6); } }
   .bar {
     position: relative; height: 18px; margin-top: 3px;
     border: 2.5px solid var(--ink);
@@ -151,7 +160,7 @@
 
 <div id="hud" hidden>
   <div id="vitals">
-    <div class="bar-label">Vigour</div>
+    <div class="bar-label">Willpower <span id="resolve" title="Resolve: press F to steel your will"></span></div>
     <div class="bar"><div class="ghost" id="hp-ghost"></div><div class="fill" id="hp-fill"></div></div>
     <div class="bar small"><div class="fill" id="st-fill"></div></div>
   </div>
@@ -181,6 +190,7 @@
       <b>Hold left</b><span>charge a heavy slam</span>
       <b>Right click</b><span>shield: raise it as a blow lands to <b>parry</b></span>
       <b>Space</b><span>roll: you can't be hurt mid-roll</span>
+      <b>F</b><span>kneel and steel your will: heals, uses one <b>resolve</b></span>
       <b>Q</b><span>lock on</span>
       <b>M</b><span>mute</span>
     </div>
@@ -190,7 +200,7 @@
 
 <div class="overlay dead" id="dead-screen" hidden>
   <div class="panel">
-    <h1 class="title">Your oath is ended</h1>
+    <h1 class="title">Your will is broken</h1>
     <p id="dead-stats"></p>
     <p class="prompt">Click to rise again</p>
   </div>
