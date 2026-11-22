@@ -323,6 +323,7 @@ class Game {
       this.hud.update(realDt);
       this.fx.draw2d(realDt);
       this.input.endFrame();
+      this.knight.updateFPVisibility();
       this.updateLights();
       this.post.render();
       return;
@@ -341,12 +342,15 @@ class Game {
     } else {
       // on the menu: slowly circle the cathedral
       this.rig.yaw += realDt * 0.05;
+      this.knight.facing = this.rig.yaw;
+      this.knight.updateVisuals(0);
       this.fx.update(0, realDt);
     }
     this.rig.update(realDt);
     this.world.update(this.camera);
     this.fx.draw2d(realDt);
     this.input.endFrame();
+    this.knight.updateFPVisibility();
     this.updateLights();
     this.post.render();
   }

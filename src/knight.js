@@ -13,7 +13,7 @@
 // =====================================================
 import * as THREE from 'three';
 import { INK, WHITE, ICHOR } from './fx.js';
-import { lathe, capsule, rbox, plate, bladeGeo } from './shapes.js';
+import { lathe, smoothLathe, capsule, plate, bladeGeo, bend, scaled, finish } from './shapes.js';
 import { sweep, settleSoft, targets } from './combat.js';
 
 // ---------- tuning numbers ----------
@@ -94,6 +94,11 @@ export class Knight {
     this.pos = new THREE.Vector3();
     this.vel = new THREE.Vector3();
     this.build();
+    // First-person resting poses: sword low on the right, shield low on the left, both in view.
+    this.fpPoses = {
+      idle: P({ armRx: -0.95, armRy: -0.05, armRz: 0, elbowR: -0.95, wristR: -0.85, armLx: -0.65, armLy: -0.05, armLz: 0, elbowL: -1.9 }),
+      block: P({ armRx: -0.85, armRy: -0.15, armRz: 0, elbowR: -1.0, wristR: -0.9, armLx: -1.15, armLy: -0.35, armLz: 0, elbowL: -1.7 }),
+    };
     this.reset();
     this._b0 = new THREE.Vector3(); this._t0 = new THREE.Vector3();
     this._b1 = new THREE.Vector3(); this._t1 = new THREE.Vector3();
@@ -136,19 +141,23 @@ export class Knight {
   build() {
     const S = this.game.mats;
     const STEEL = 0x9a9da2, DARK = 0x4a4d52, CLOTH = 0x6a1c16, LEATHER = 0x3b2a1c, MAIL = 0x7b7d80, PALE = 0xcfc4ac;
-    const BRASS = 0xb39a5c, BLADE = 0xd4d7da, FULLER = 0x8f9296, SHIELD = 0x6b2a20;
+    const BRASS = 0xb39a5c, BLADE = 0xd4d7da, SHIELD = 0x6b2a20, GLOVE = 0x2e231a;
     // how each colour behaves under light: metal or not, and how polished
     const LOOK = {
-      [STEEL]: { metal: 1, rough: 0.32 }, [DARK]: { metal: 1, rough: 0.45 }, [MAIL]: { metal: 1, rough: 0.55 },
-      [BRASS]: { metal: 1, rough: 0.35 }, [BLADE]: { metal: 1, rough: 0.18 }, [FULLER]: { metal: 1, rough: 0.3 },
-      [CLOTH]: { rough: 0.95 }, [PALE]: { rough: 0.9 }, [LEATHER]: { rough: 0.65 }, [SHIELD]: { rough: 0.6 },
+      [STEEL]: { metal: 1, rough: 0.3 }, [DARK]: { metal: 1, rough: 0.42 }, [MAIL]: { metal: 1, rough: 0.55 },
+      [BRASS]: { metal: 1, rough: 0.33 }, [BLADE]: { metal: 1, rough: 0.16 },
+      [CLOTH]: { rough: 0.95 }, [PALE]: { rough: 0.9 }, [LEATHER]: { rough: 0.62 }, [SHIELD]: { rough: 0.55 }, [GLOVE]: { rough: 0.7 },
     };
+    this.fpHide = [];       // parts of the body that vanish in first person (everything but arms, sword and shield)
+    this.fpArms = [];       // the arms, sword and shield
+    let into = this.fpHide;
     // put a shape on a joint at (x, y, z), optionally turned
-    const put = (geo, tint, parent, x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0) => {
-      const m = S.part(geo, tint, LOOK[tint] || {});
+    const put = (geo, tint, parent, x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0, extra = {}) => {
+      const m = S.part(geo, tint, { ...(LOOK[tint] || {}), ...extra });
       m.position.set(x, y, z);
       m.rotation.set(rx, ry, rz);
       parent.add(m);
+      (into || this.fpArms).push(m);
       return m;
     };
     const joint = (parent, x, y, z) => {
@@ -158,6 +167,8 @@ export class Knight {
       parent.add(g);
       return g;
     };
+    const both = { side: THREE.DoubleSide };
+    const dark = S.glow(0x050403, 1);
 
     this.root = new THREE.Group();
     this.game.scene.add(this.root);
@@ -167,119 +178,160 @@ export class Knight {
     // ---- body ----
     const hips = joint(inner, 0, 1.0, 0);
     this.hips = hips;
-    // mail skirt, flaring out
-    put(lathe([[0.21, 0.08], [0.23, -0.05], [0.27, -0.22], [0.29, -0.3]], 20, 0.8), MAIL, hips);
+    // mail skirt, flaring out over the thighs
+    put(smoothLathe([[0.2, 0.08], [0.225, -0.04], [0.265, -0.2], [0.295, -0.34]], 48, 0.8), MAIL, hips, 0, 0, 0, 0, 0, 0, both);
+    put(new THREE.TorusGeometry(0.28, 0.012, 8, 48), DARK, hips, 0, -0.33, 0, Math.PI / 2).scale.set(1, 0.8, 1);
     const torso = joint(hips, 0, 0.12, 0);
-    // breastplate: barrel chested, flatter front to back
-    put(lathe([[0.0, -0.06], [0.2, -0.06], [0.23, 0.1], [0.265, 0.3], [0.255, 0.46], [0.19, 0.58], [0.09, 0.62], [0, 0.62]], 22, 0.74), STEEL, torso);
-    // the red tabard over it, front and back, hanging past the belt
-    for (const s of [1, -1]) {
-      put(rbox(0.36, 0.86, 0.025, 0.012), CLOTH, torso, 0, 0.0, s * 0.19);
+    // breastplate: barrel chest tapering to the waist, with a ridge down the middle
+    const chest = smoothLathe([[0.0, -0.07], [0.19, -0.06], [0.215, 0.06], [0.255, 0.26], [0.265, 0.4], [0.235, 0.52], [0.15, 0.6], [0.0, 0.63]], 56, 0.76);
+    {
+      const p = chest.attributes.position;
+      for (let i = 0; i < p.count; i++) {
+        const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+        if (z > 0) p.setZ(i, z + 0.022 * Math.exp(-((x / 0.05) ** 2)) * Math.min(1, Math.max(0, (y + 0.05) / 0.2)) * (1 - Math.max(0, (y - 0.4) / 0.25)));
+      }
     }
-    put(rbox(0.055, 0.38, 0.012, 0.005), PALE, torso, 0, 0.24, 0.205);          // the pale cross
-    put(rbox(0.25, 0.055, 0.012, 0.005), PALE, torso, 0, 0.32, 0.205);
+    put(finish(chest), STEEL, torso);
+    // overlapping plates round the waist
+    for (let i = 0; i < 3; i++) {
+      put(smoothLathe([[0.215 + i * 0.012, 0.0 - i * 0.045], [0.228 + i * 0.014, -0.025 - i * 0.045], [0.222 + i * 0.014, -0.05 - i * 0.045]], 48, 0.78), STEEL, torso, 0, 0.02, 0);
+    }
+    // the red tabard, front and back, hanging past the belt and swaying slightly
+    for (const s of [1, -1]) {
+      const cloth = new THREE.PlaneGeometry(0.34, 0.9, 8, 14);
+      const cp = cloth.attributes.position;
+      for (let i = 0; i < cp.count; i++) {
+        const x = cp.getX(i), y = cp.getY(i);
+        cp.setZ(i, 0.015 * Math.sin(y * 9 + x * 6) + Math.max(0, -y - 0.1) * 0.06 + 0.05 * x * x);
+      }
+      cloth.computeVertexNormals();
+      put(cloth, CLOTH, torso, 0, -0.02, s * 0.215, 0, s > 0 ? 0 : Math.PI, 0, both);
+    }
+    put(new THREE.PlaneGeometry(0.05, 0.4), PALE, torso, 0, 0.2, 0.232, 0, 0, 0, both);          // the pale cross
+    put(new THREE.PlaneGeometry(0.22, 0.05), PALE, torso, 0, 0.3, 0.232, 0, 0, 0, both);
     // belt with a buckle
-    put(new THREE.TorusGeometry(0.235, 0.03, 8, 28), LEATHER, torso, 0, 0.0, 0, Math.PI / 2, 0, 0).scale.set(1, 0.76, 1);
-    put(rbox(0.07, 0.06, 0.03, 0.01), BRASS, torso, 0, 0.0, 0.18);
+    put(new THREE.TorusGeometry(0.235, 0.03, 12, 48), LEATHER, torso, 0, 0.0, 0, Math.PI / 2, 0, 0).scale.set(1, 0.76, 1);
+    put(scaled(new THREE.SphereGeometry(0.032, 16, 12), 1.2, 0.9, 0.5), BRASS, torso, 0, 0.0, 0.185);
     // gorget (neck guard)
-    put(lathe([[0.13, 0], [0.12, 0.06], [0.09, 0.1]], 16), DARK, torso, 0, 0.58, 0);
-    // layered pauldrons
+    put(smoothLathe([[0.14, 0.0], [0.13, 0.045], [0.105, 0.1]], 40), DARK, torso, 0, 0.58, 0);
+    // layered pauldrons: three overlapping domed plates on each shoulder
     for (const s of [-1, 1]) {
-      const pa = put(new THREE.SphereGeometry(0.16, 18, 10, 0, Math.PI * 2, 0, Math.PI / 2), STEEL, torso, s * 0.3, 0.5, 0);
-      pa.scale.set(1.15, 0.85, 1.1);
-      pa.rotation.z = -s * 0.35;
-      const pb = put(new THREE.SphereGeometry(0.17, 18, 8, 0, Math.PI * 2, Math.PI / 3, Math.PI / 6), STEEL, torso, s * 0.32, 0.47, 0);
-      pb.scale.set(1.15, 1, 1.1);
-      pb.rotation.z = -s * 0.4;
+      for (let i = 0; i < 3; i++) {
+        const lame = scaled(new THREE.SphereGeometry(0.15 - i * 0.012, 28, 16, 0, Math.PI * 2, 0, Math.PI / 2 - i * 0.12), 1.2, 0.85, 1.1);
+        const pa = put(lame, STEEL, torso, s * (0.31 + i * 0.012), 0.52 - i * 0.045, 0);
+        pa.rotation.z = -s * (0.32 + i * 0.1);
+      }
     }
 
     // ---- the great helm ----
     const head = joint(torso, 0, 0.66, 0);
     this.headJ = head;
-    put(lathe([[0.0, -0.02], [0.15, -0.02], [0.163, 0.06], [0.168, 0.2], [0.158, 0.28], [0.125, 0.335], [0.06, 0.365], [0.0, 0.37]], 22), STEEL, head);
-    const slit = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.026, 0.05), S.glow(0x15120e));
-    slit.position.set(0, 0.2, 0.15);
-    head.add(slit);
-    for (let i = 0; i < 5; i++) {                                                 // breathing holes
-      const hole = new THREE.Mesh(new THREE.CylinderGeometry(0.009, 0.009, 0.05, 6), S.glow(0x15120e));
-      hole.rotation.x = Math.PI / 2;
-      hole.position.set(0.04 + (i % 2) * 0.03, 0.1 - Math.floor(i / 2) * 0.03, 0.16);
-      head.add(hole);
+    put(smoothLathe([[0.0, -0.02], [0.145, -0.02], [0.165, 0.06], [0.17, 0.2], [0.157, 0.29], [0.12, 0.345], [0.06, 0.37], [0.0, 0.375]], 56), STEEL, head);
+    put(new THREE.TorusGeometry(0.162, 0.008, 8, 48), DARK, head, 0, 0.13, 0, Math.PI / 2);      // reinforcing band
+    put(scaled(new THREE.SphereGeometry(0.1, 20, 12), 1.3, 0.14, 0.6), STEEL, head, 0, 0.2, 0.147, 0, 0, 0, { material: dark });   // the dark eye slit
+    for (let i = 0; i < 6; i++) {                                                  // breathing holes
+      put(new THREE.CircleGeometry(0.009, 10), STEEL, head, 0.035 + (i % 2) * 0.03, 0.1 - Math.floor(i / 2) * 0.03, 0.169, 0, 0, 0, { material: dark });
     }
-    put(rbox(0.018, 0.3, 0.03, 0.008), DARK, head, 0, 0.17, 0.165);              // nose ridge
+    put(scaled(new THREE.SphereGeometry(0.03, 12, 10), 0.35, 4.2, 0.8), DARK, head, 0, 0.17, 0.168);      // nose ridge
     // a red plume flowing back off the crown
     const plumeCurve = new THREE.CatmullRomCurve3([
-      new THREE.Vector3(0, 0.36, 0.02), new THREE.Vector3(0, 0.46, -0.08), new THREE.Vector3(0, 0.42, -0.25), new THREE.Vector3(0, 0.25, -0.38),
+      new THREE.Vector3(0, 0.37, 0.02), new THREE.Vector3(0, 0.47, -0.08), new THREE.Vector3(0, 0.43, -0.25), new THREE.Vector3(0, 0.26, -0.38),
     ]);
-    put(new THREE.TubeGeometry(plumeCurve, 16, 0.045, 8), CLOTH, head);
+    put(new THREE.TubeGeometry(plumeCurve, 28, 0.045, 14), CLOTH, head);
 
-    // ---- arms (both built the same) ----
+    // ---- arms (both built the same): the parts you still see in first person ----
+    into = null;
     const arm = (side) => {
       const sh = joint(torso, side * 0.33, 0.52, 0);
-      put(capsule(0.07, 0.32, 0.075), MAIL, sh);
+      put(capsule(0.06, 0.32, 0.07), MAIL, sh);                                    // mail sleeve
+      put(capsule(0.052, 0.17, 0.062, 0.02), STEEL, sh, 0, -0.03, 0);              // rerebrace (upper arm plate)
       const el = joint(sh, 0, -0.32, 0);
-      put(new THREE.SphereGeometry(0.07, 14, 10), STEEL, el);                    // elbow cop
-      put(lathe([[0.062, 0.02], [0.07, -0.05], [0.064, -0.2], [0.055, -0.27]], 16), STEEL, el);
-      put(rbox(0.12, 0.11, 0.13, 0.035), DARK, el, 0, -0.32, 0);                // gauntlet
+      put(scaled(new THREE.SphereGeometry(0.068, 20, 14), 1.0, 0.9, 1.05), STEEL, el);          // elbow cop
+      put(scaled(new THREE.SphereGeometry(0.04, 12, 10), 0.5, 1.2, 1.4), STEEL, el, side * 0.06, 0, -0.01);   // its wing
+      put(smoothLathe([[0.06, 0.02], [0.07, -0.05], [0.066, -0.17], [0.052, -0.29]], 28), STEEL, el);   // vambrace
       return { sh, el };
     };
     const R = arm(-1), L = arm(1);
     const armR = R.sh, elbowR = R.el, armL = L.sh, elbowL = L.el;
+    // a gauntlet: flared cuff, back-of-hand plate, fingers
+    const gauntlet = (parent, fist) => {
+      put(smoothLathe([[0.052, -0.28], [0.066, -0.31], [0.07, -0.35], [0.06, -0.37]], 28), DARK, parent);
+      put(scaled(new THREE.SphereGeometry(0.06, 20, 14), 0.95, 0.75, 1.05), DARK, parent, 0, -0.41, 0.0);
+      for (let i = 0; i < 4; i++) {
+        const f = put(capsule(0.0125, 0.075, 0.0135, 0.0), GLOVE, parent, (i - 1.5) * 0.026, -0.43, 0.04);
+        f.rotation.x = fist ? -1.7 : -0.5;
+      }
+      put(scaled(new THREE.SphereGeometry(0.02, 10, 8), 0.8, 1.6, 0.8), GLOVE, parent, -0.055, -0.4, 0.025).rotation.z = 0.5;    // thumb
+    };
+    gauntlet(elbowR, true);
+    gauntlet(elbowL, true);
 
     // ---- the sword ----
     const wristR = joint(elbowR, 0, -0.34, 0);
-    put(new THREE.CylinderGeometry(0.023, 0.026, 0.22, 10), LEATHER, wristR, 0, 0.02, 0);   // grip
-    put(new THREE.CylinderGeometry(0.045, 0.045, 0.03, 14), DARK, wristR, 0, 0.15, 0, Math.PI / 2);   // wheel pommel
-    // crossguard: a bar that curves slightly toward the blade
-    const guardCurve = new THREE.QuadraticBezierCurve3(new THREE.Vector3(-0.18, -0.08, 0), new THREE.Vector3(0, -0.12, 0), new THREE.Vector3(0.18, -0.08, 0));
-    put(new THREE.TubeGeometry(guardCurve, 12, 0.017, 8), DARK, wristR);
+    // grip: wrapped leather, with a ridge for each turn of the wrap
+    const gripPts = [[0.0005, 0.14]];
+    for (let i = 0; i <= 22; i++) { const t = i / 22; gripPts.push([0.0215 + 0.0035 * Math.sin(t * Math.PI * 9) + 0.002 * Math.sin(t * Math.PI), 0.14 - t * 0.22]); }
+    gripPts.push([0.0005, -0.08]);
+    put(lathe(gripPts, 20, 1, Math.PI / 1.5), LEATHER, wristR, 0, 0.0, 0);
+    put(scaled(new THREE.SphereGeometry(0.045, 24, 16), 1, 0.7, 1), BRASS, wristR, 0, 0.165, 0);          // pommel
+    // crossguard: a bar that droops slightly toward the blade, with ball ends
+    for (const s of [-1, 1]) {
+      put(capsule(0.014, 0.19, 0.019, 0.0), DARK, wristR, s * 0.01, -0.09, 0, 0, 0, s * (Math.PI / 2 - 0.1));
+      put(new THREE.SphereGeometry(0.026, 16, 12), BRASS, wristR, s * 0.2, -0.115, 0);
+    }
+    put(scaled(new THREE.SphereGeometry(0.03, 16, 12), 1.1, 0.8, 1.6), BRASS, wristR, 0, -0.095, 0);
     put(bladeGeo(1.04, 0.07), BLADE, wristR, 0, -0.12, 0);
-    put(rbox(0.012, 0.75, 0.012, 0.004), FULLER, wristR, 0, -0.5, 0.004);      // the fuller (groove)
     this.bladeBase = new THREE.Object3D(); this.bladeBase.position.y = -0.14; wristR.add(this.bladeBase);
     this.bladeTip = new THREE.Object3D(); this.bladeTip.position.y = -1.17; wristR.add(this.bladeTip);
 
-    // ---- the shield: a heater with a rim, a boss and a cross ----
+    // ---- the shield: a curved heater with a rolled rim, a boss and a cross ----
     const shield = new THREE.Group();
     shield.position.set(0.1, -0.17, 0);
     shield.rotation.x = Math.PI;          // pointy end toward the elbow
     elbowL.add(shield);
     const outline = [];
-    for (let i = 0; i <= 12; i++) {
-      const t = i / 12;
+    for (let i = 0; i <= 14; i++) {
+      const t = i / 14;
       outline.push([0.33 * Math.cos(t * Math.PI / 2) ** 0.6, 0.38 - 0.88 * Math.sin(t * Math.PI / 2) ** 1.4]);
     }
     // down the right side to the point, then back up the left side
     const full = [...outline, ...outline.slice(0, -1).reverse().map(([x, y]) => [-x, y])];
-    const face = plate(full, 0.04, 0.012);
-    face.rotateY(Math.PI / 2);
-    put(face, SHIELD, shield);
+    // Every piece is built facing +z, bent so it curves round your arm, then turned to face along x.
+    const curved = (g) => { const b = bend(g, 0.55, 0); b.rotateY(Math.PI / 2); return b; };
+    put(curved(plate(full, 0.035, 0.012)), SHIELD, shield);
     const rimPts = full.map(([x, y]) => [x * 1.06, y * 1.06 + 0.005]);
-    const rim = plate(rimPts, 0.02, 0.008, [full.map(([x, y]) => [x * 0.98, y * 0.98]).reverse()]);
-    rim.rotateY(Math.PI / 2);
-    put(rim, DARK, shield, 0.022, 0, 0);
-    put(rbox(0.018, 0.66, 0.08, 0.008), PALE, shield, 0.03, 0.03, 0);
-    put(rbox(0.018, 0.08, 0.52, 0.008), PALE, shield, 0.03, 0.16, 0);
-    put(new THREE.SphereGeometry(0.06, 14, 10, 0, Math.PI), BRASS, shield, 0.03, 0.16, 0, 0, Math.PI / 2);
+    put(curved(plate(rimPts, 0.022, 0.01, [full.map(([x, y]) => [x * 0.98, y * 0.98]).reverse()])), DARK, shield);
+    for (const f of [1, -1]) {        // the same emblem on both faces, so it shows from any side
+      put(curved(plate([[-0.025, 0.36], [0.025, 0.36], [0.025, -0.4], [-0.025, -0.4]], 0.012, 0.005)), PALE, shield, 0.03 * f, 0.0, 0);
+      put(curved(plate([[-0.28, 0.17], [0.28, 0.17], [0.28, 0.13], [-0.28, 0.13]], 0.012, 0.005)), PALE, shield, 0.03 * f, 0.0, 0);
+      put(scaled(new THREE.SphereGeometry(0.065, 24, 16), 0.55, 1, 1), BRASS, shield, 0.04 * f, 0.15, 0);
+    }
     this.shield = shield;
 
     // ---- legs ----
+    into = this.fpHide;
     this.legs = [];
     for (const s of [1, -1]) {
       const hip = joint(inner, s * 0.12, 0.92, 0);
-      put(capsule(0.085, 0.44, 0.1), MAIL, hip);                                  // thigh
-      put(lathe([[0.0, 0.05], [0.09, 0.05], [0.1, -0.08], [0.09, -0.22], [0, -0.22]], 16, 0.8), STEEL, hip, 0, -0.08, 0.02);   // cuisse plate
+      put(capsule(0.082, 0.44, 0.098), MAIL, hip);                                 // thigh
+      put(smoothLathe([[0.06, 0.05], [0.105, 0.0], [0.108, -0.1], [0.095, -0.24]], 28, 0.9), STEEL, hip, 0, -0.0, 0.01);   // cuisse plate
       const knee = joint(hip, 0, -0.44, 0);
-      put(new THREE.SphereGeometry(0.075, 14, 10), STEEL, knee, 0, 0, 0.03);      // knee cop
-      put(lathe([[0.065, 0.0], [0.078, -0.08], [0.07, -0.3], [0.055, -0.4]], 16), STEEL, knee);   // greave
-      // sabaton: pointed, segmented steel shoe
-      const shoe = plate([[-0.06, -0.08], [0.06, -0.08], [0.06, 0.12], [0.0, 0.2], [-0.06, 0.12]], 0.07, 0.015);
-      shoe.rotateX(-Math.PI / 2);
-      put(shoe, DARK, knee, 0, -0.43, 0.04);
+      put(scaled(new THREE.SphereGeometry(0.078, 20, 14), 1, 0.95, 1.1), STEEL, knee, 0, 0, 0.03);       // knee cop
+      put(capsule(0.056, 0.43, 0.078), STEEL, knee);                              // greave
+      // sabaton: a pointed shoe, narrow at the toe
+      const shoe = new THREE.SphereGeometry(1, 20, 14);
+      const sp = shoe.attributes.position;
+      for (let i = 0; i < sp.count; i++) {
+        const z = sp.getZ(i);
+        const taper = z > 0 ? 1 - 0.55 * z * z : 1;
+        sp.setX(i, sp.getX(i) * 0.065 * taper); sp.setY(i, sp.getY(i) * 0.05 * (z > 0 ? 1 - 0.3 * z : 1)); sp.setZ(i, z * 0.15);
+      }
+      put(finish(shoe), DARK, knee, 0, -0.45, 0.07);
       this.legs.push({ hip, knee });
     }
 
     // ---- a cape that sways as you move ----
-    const capeGeo = new THREE.PlaneGeometry(0.46, 0.95, 6, 10);
+    const capeGeo = new THREE.PlaneGeometry(0.46, 0.95, 10, 16);
     capeGeo.translate(0, -0.475, 0);
     // narrower at the shoulders, with a ragged hem
     {
@@ -297,17 +349,39 @@ export class Knight {
     cape.position.set(0, 0.56, -0.2);
     torso.add(cape);
     this.cape = cape;
+    this.fpHide.push(cape);
     this.capeSwing = 0;
 
     this.j = { torso, armR, elbowR, wristR, armL, elbowL, head };
 
-    // a soft ink shadow under your feet
+    // a soft contact shadow under your feet
     const shadowTex = this.game.fx.softTex;
     this.shadow = new THREE.Mesh(new THREE.CircleGeometry(0.55, 16),
       new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35, depthWrite: false, map: shadowTex }));
     this.shadow.rotation.x = -Math.PI / 2;
     this.shadow.renderOrder = 2;
     this.game.scene.add(this.shadow);
+  }
+
+  /** Every frame: hide the body in first person, show it for cutscenes; hide the arms while you tumble or fall. */
+  updateFPVisibility() {
+    const fp = !this.game.cinematic.active;
+    this.setFirstPerson(fp);
+    const armsOn = !fp || (this.state !== 'roll' && this.state !== 'dead');
+    if (armsOn !== this.armsOn) {
+      this.armsOn = armsOn;
+      for (const m of this.fpArms) m.visible = armsOn;
+    }
+  }
+
+  /** First person hides your body (the camera is inside the helm) but keeps your arms, sword and shield. */
+  setFirstPerson(on) {
+    if (this.fp === on) return;
+    this.fp = on;
+    for (const m of this.fpHide) m.visible = !on;
+    // in first person the shield is turned to face forward, and a little smaller so it doesn't fill your view
+    this.shield.rotation.set(Math.PI, on ? -Math.PI / 2 : 0, 0);
+    this.shield.scale.setScalar(on ? 0.75 : 1);
   }
 
   // ================================================================ cinematic control
@@ -425,7 +499,7 @@ export class Knight {
       const d = Math.hypot(t.pos.x - this.pos.x, t.pos.z - this.pos.z);
       const step = Math.min(STEP_IN_MAX, Math.max(0, d - this.sweetSpot(t)));
       this.forward(this.lunge).multiplyScalar(step * 10);
-    } else if (moveDir.lengthSq() > 0.01) this.facing = Math.atan2(moveDir.x, moveDir.z);
+    } else this.facing = this.game.rig.yaw;      // no target: swing where you're looking
     this.game.angels.onKnightAttack(this);
     if (a.windup === 0) this.beginActive();
   }
@@ -458,7 +532,6 @@ export class Knight {
     this.spend(ROLL_COST);
     if (moveDir.lengthSq() > 0.01) this.rollDir.copy(moveDir).normalize();
     else this.forward(this.rollDir).multiplyScalar(-1);
-    this.facing = Math.atan2(this.rollDir.x, this.rollDir.z);
     this.invuln = 0.38;
     this.game.sound.roll();
   }
@@ -642,14 +715,12 @@ export class Knight {
       case 'move': {
         const sprint = input.key('ShiftLeft') || input.key('ShiftRight');
         speed = this.blocking ? GUARD_WALK : sprint ? SPRINT : WALK;
-        if (lock && lock.alive && !sprint) turnTo = Math.atan2(lock.pos.x - this.pos.x, lock.pos.z - this.pos.z);
-        else if (move.lengthSq() > 0.01) turnTo = Math.atan2(move.x, move.z);
+        turnTo = rig.yaw;       // first person: you face where you look
         break;
       }
       case 'charge':
         speed = 1.0;
-        if (lock && lock.alive) turnTo = Math.atan2(lock.pos.x - this.pos.x, lock.pos.z - this.pos.z);
-        else if (move.lengthSq() > 0.01) turnTo = Math.atan2(move.x, move.z);
+        turnTo = rig.yaw;
         break;
       case 'attack':
         this.updateAttack(dt, move);
@@ -683,7 +754,8 @@ export class Knight {
         break;
     }
 
-    if (turnTo !== null) this.facing = angleLerp(this.facing, turnTo, 1 - Math.exp(-dt * 12));
+    if (turnTo !== null) this.facing = turnTo;
+    else if (this.state === 'steel' || this.state === 'recoil' || this.state === 'stagger' || this.state === 'roll') this.facing = rig.yaw;
 
     // ---------------- movement ----------------
     if (this.state === 'move' || this.state === 'charge') {
@@ -834,6 +906,9 @@ export class Knight {
   }
 
   // ================================================================ animation
+  /** The pose the arms settle into when nothing is happening. */
+  restPose() { return this.fp ? this.fpPoses.idle : POSES.idle; }
+
   updateVisuals(dt) {
     const target = {};
     const st = this.state;
@@ -842,7 +917,7 @@ export class Knight {
       const from = POSES[a.from], to = POSES[a.to];
       if (a.phase === 'windup') blend(target, this.poseFrom, from, ease(Math.min(1, a.t / a.windup)));
       else if (a.phase === 'active') blend(target, from, to, easeInOut(Math.min(1, a.t / a.active)));
-      else blend(target, to, POSES.idle, ease(Math.min(1, a.t / a.recover)));
+      else blend(target, to, this.restPose(), ease(Math.min(1, a.t / a.recover)));
       Object.assign(this.pose, target);
     } else if (st === 'charge') {
       blend(target, this.poseFrom, POSES.Ha, ease(Math.min(1, this.stateT / 0.25)));
@@ -851,7 +926,7 @@ export class Knight {
       target.torsoY += (Math.random() - 0.5) * tremble;
       Object.assign(this.pose, target);
     } else if (st === 'recoil') {
-      blend(target, POSES.recoil, POSES.idle, ease(Math.min(1, this.stateT / 0.32)));
+      blend(target, POSES.recoil, this.restPose(), ease(Math.min(1, this.stateT / 0.32)));
       Object.assign(this.pose, target);
     } else if (st === 'steel') {
       blend(target, this.poseFrom, POSES.kneel, ease(Math.min(1, this.stateT / 0.35)));
@@ -859,10 +934,10 @@ export class Knight {
       target.torsoX += Math.sin(this.stateT * 2) * 0.03;      // slow breathing
       Object.assign(this.pose, target);
     } else if (st === 'stagger' || st === 'dead') {
-      blend(target, POSES.stagger, POSES.idle, st === 'dead' ? 0 : ease(Math.max(0, Math.min(1, this.stateT / 0.38))));
+      blend(target, POSES.stagger, this.restPose(), st === 'dead' ? 0 : ease(Math.max(0, Math.min(1, this.stateT / 0.38))));
       Object.assign(this.pose, target);
     } else {
-      const goal = this.blocking ? POSES.block : POSES.idle;
+      const goal = this.blocking ? (this.fp ? this.fpPoses.block : POSES.block) : this.restPose();
       const k = dt > 0 ? 1 - Math.exp(-dt * (this.blocking ? 22 : 10)) : 0;
       blend(this.pose, this.pose, goal, k);
       // arms swing a little when walking

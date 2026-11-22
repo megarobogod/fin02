@@ -133,6 +133,13 @@ export class HUD {
       return { x: (v.x * 0.5 + 0.5) * w, y: (-v.y * 0.5 + 0.5) * h, behind: v.z > 1 };
     };
 
+    // ---- a tiny dot in the middle of the view ----
+    g.save();
+    g.fillStyle = 'rgba(236,230,218,0.75)';
+    g.shadowColor = 'rgba(0,0,0,0.9)'; g.shadowBlur = 3 * scale;
+    g.beginPath(); g.arc(w / 2, h / 2, 2.2 * scale, 0, Math.PI * 2); g.fill();
+    g.restore();
+
     // ---- the lock-on circle: two thin rings ----
     const lock = game.rig.lock;
     if (lock && lock.alive) {

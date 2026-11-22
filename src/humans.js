@@ -17,7 +17,7 @@
 // when you leave, so the whole city doesn't have to be simulated at once.
 // =====================================================
 import * as THREE from 'three';
-import { lathe, capsule, rbox, plate } from './shapes.js';
+import { lathe, smoothLathe, capsule, ellipsoid, plate, scaled, finish } from './shapes.js';
 import { INK, WHITE, BLOOD } from './fx.js';
 import { KIND } from './combat.js';
 import { castShadows } from './materials.js';
@@ -42,36 +42,86 @@ const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
 // ---------- shared shapes (made once) ----------
 let G = null;
+
+/** A human head: a skull with a jaw and chin, not a ball. About 22 cm tall. */
+function headGeo() {
+  const g = new THREE.SphereGeometry(1, 36, 28);
+  const p = g.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    let x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    const t = Math.max(0, -y);                       // 0 at the brow, 1 at the chin
+    x *= 0.092 * (1 - 0.34 * t * t);                 // the jaw narrows
+    z *= 0.105 * (1 - 0.12 * t);
+    z += t * t * 0.012 * (z > 0 ? 1 : 0);            // the chin comes forward
+    y *= y < 0 ? 0.125 : 0.112;
+    p.setXYZ(i, x, y, z);
+  }
+  return finish(g);
+}
+
+/** A boot or shoe, pointing along +z. */
+function footGeo() {
+  const g = new THREE.SphereGeometry(1, 22, 14);
+  const p = g.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const z = p.getZ(i);
+    const taper = z > 0 ? 1 - 0.4 * z * z : 1;
+    p.setXYZ(i, p.getX(i) * 0.05 * taper, p.getY(i) * 0.04, z * 0.13);
+  }
+  return finish(g);
+}
+
+/** Folds in cloth: wobble the radius of a lathe as it goes round. */
+function folds(g, amount, count, from = 0) {
+  const p = g.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), z = p.getZ(i);
+    const a = Math.atan2(z, x);
+    const k = 1 + Math.sin(a * count + from) * amount + Math.sin(a * (count * 2 + 1)) * amount * 0.35;
+    p.setX(i, x * k); p.setZ(i, z * k);
+  }
+  return finish(g);
+}
+
 function shapes() {
   if (G) return G;
   G = {
-    torso: lathe([[0.0, -0.02], [0.17, -0.02], [0.19, 0.12], [0.21, 0.32], [0.19, 0.46], [0.11, 0.54], [0.0, 0.55]], 16, 0.7),
-    pelvis: lathe([[0.0, 0.06], [0.17, 0.06], [0.18, -0.08], [0.14, -0.14], [0.0, -0.14]], 14, 0.75),
-    coat: lathe([[0.2, 0.36], [0.22, 0.1], [0.25, -0.2], [0.29, -0.5]], 16, 0.75),
-    head: new THREE.SphereGeometry(0.12, 16, 12),
-    hood: new THREE.SphereGeometry(0.15, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.62),
-    hair: new THREE.SphereGeometry(0.128, 14, 10, 0, Math.PI * 2, 0, Math.PI * 0.45),
-    upper: capsule(0.055, 0.29, 0.065),
-    fore: capsule(0.045, 0.27, 0.05),
-    hand: new THREE.SphereGeometry(0.045, 10, 8),
-    thigh: capsule(0.075, 0.42, 0.085),
-    shin: capsule(0.058, 0.42, 0.065),
-    foot: rbox(0.1, 0.07, 0.24, 0.03),
-    scarf: new THREE.TorusGeometry(0.1, 0.04, 8, 16),
-    pack: rbox(0.28, 0.34, 0.14, 0.05),
-    mask: rbox(0.17, 0.13, 0.08, 0.035),
-    filter: new THREE.CylinderGeometry(0.04, 0.045, 0.06, 12),
-    spike: new THREE.ConeGeometry(0.03, 0.14, 8),
-    pad: new THREE.SphereGeometry(0.1, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2),
-    helmet: lathe([[0.0, 0.2], [0.11, 0.19], [0.145, 0.12], [0.15, -0.06], [0.155, -0.12]], 18),
+    torso: smoothLathe([[0.0, -0.03], [0.165, -0.03], [0.175, 0.1], [0.195, 0.3], [0.215, 0.42], [0.17, 0.51], [0.08, 0.56], [0.0, 0.575]], 40, 0.66),
+    pelvis: smoothLathe([[0.0, 0.07], [0.17, 0.06], [0.185, -0.06], [0.15, -0.15], [0.0, -0.16]], 36, 0.72),
+    coat: folds(smoothLathe([[0.21, 0.38], [0.225, 0.1], [0.26, -0.2], [0.31, -0.5]], 48, 0.78), 0.035, 9),
+    neck: capsule(0.045, 0.1, 0.05, 0),
+    head: headGeo(),
+    nose: ellipsoid(0.016, 0.026, 0.026, 12),
+    ear: ellipsoid(0.01, 0.026, 0.017, 10),
+    brow: ellipsoid(0.07, 0.014, 0.03, 14),
+    eye: ellipsoid(0.012, 0.007, 0.008, 10),
+    hood: scaled(new THREE.SphereGeometry(0.15, 32, 20, 0, Math.PI * 2, 0, Math.PI * 0.64), 1, 1.05, 1.05),
+    hair: scaled(new THREE.SphereGeometry(0.122, 28, 16, 0, Math.PI * 2, 0, Math.PI * 0.47), 0.92, 1.0, 1.1),
+    shoulder: ellipsoid(0.065, 0.06, 0.065, 16),
+    upper: capsule(0.043, 0.29, 0.056),
+    fore: capsule(0.034, 0.27, 0.046),
+    elbow: ellipsoid(0.045, 0.045, 0.045, 14),
+    hand: ellipsoid(0.034, 0.055, 0.022, 14),
+    thumb: ellipsoid(0.012, 0.03, 0.012, 8),
+    thigh: capsule(0.064, 0.42, 0.086),
+    shin: capsule(0.043, 0.42, 0.062),
+    knee: ellipsoid(0.06, 0.06, 0.06, 14),
+    foot: footGeo(),
+    scarf: new THREE.TorusGeometry(0.1, 0.04, 14, 28),
+    pack: ellipsoid(0.15, 0.18, 0.085, 20),
+    mask: scaled(new THREE.SphereGeometry(0.118, 22, 10, Math.PI / 2 - 0.95, 1.9, Math.PI * 0.52, Math.PI * 0.36), 0.85, 1, 0.95),
+    filter: new THREE.CylinderGeometry(0.04, 0.045, 0.06, 20),
+    spike: new THREE.ConeGeometry(0.03, 0.14, 14),
+    pad: scaled(new THREE.SphereGeometry(0.1, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2), 1.1, 0.8, 1.1),
+    helmet: smoothLathe([[0.0, 0.2], [0.09, 0.195], [0.135, 0.15], [0.15, 0.04], [0.153, -0.07], [0.15, -0.12]], 36),
     // weapons
-    machete: plate([[-0.025, 0], [0.025, 0], [0.04, -0.4], [0.0, -0.5], [-0.03, -0.42]], 0.006, 0.004),
-    handle: new THREE.CylinderGeometry(0.018, 0.02, 0.13, 8),
-    shaft: new THREE.CylinderGeometry(0.025, 0.028, 1.1, 8),
-    hammer: rbox(0.14, 0.14, 0.3, 0.03),
-    stock: rbox(0.06, 0.07, 0.5, 0.02),
-    bow: new THREE.TorusGeometry(0.28, 0.014, 6, 16, Math.PI * 0.8),
-    bolt: new THREE.CylinderGeometry(0.01, 0.01, 0.45, 5),
+    machete: plate([[-0.025, 0], [0.025, 0], [0.042, -0.4], [0.005, -0.5], [-0.03, -0.42]], 0.006, 0.004),
+    handle: new THREE.CylinderGeometry(0.018, 0.02, 0.13, 14),
+    shaft: new THREE.CylinderGeometry(0.025, 0.028, 1.1, 14),
+    hammer: lathe([[0, 0.15], [0.06, 0.148], [0.072, 0.125], [0.074, -0.125], [0.072, -0.148], [0.06, -0.15], [0, -0.152]], 24).rotateZ(Math.PI / 2),
+    stock: ellipsoid(0.03, 0.036, 0.26, 16),
+    bow: new THREE.TorusGeometry(0.28, 0.014, 8, 28, Math.PI * 0.8),
+    bolt: new THREE.CylinderGeometry(0.01, 0.01, 0.45, 8),
     shadow: new THREE.CircleGeometry(0.5, 14),
   };
   G.shaft.translate(0, -0.45, 0);
@@ -125,6 +175,7 @@ class Person {
     const skin = S.fill(pick(SKIN), { flash: this.flash, rough: 0.55 });
     const leather = S.fill(0x33271d, { flash: this.flash, rough: 0.7 });
     const metal = S.fill(0x6f7276, { flash: this.flash, metal: 0.85, rough: 0.5 });
+    const eyeMat = S.fill(0x120e0b, { flash: this.flash, rough: 0.25 });
     const add = (geo, m, parent, x = 0, y = 0, z = 0) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); parent.add(o); return o; };
     const joint = (parent, x, y, z) => { const j = new THREE.Group(); j.position.set(x, y, z); j.rotation.order = 'YXZ'; parent.add(j); return j; };
 
@@ -138,7 +189,15 @@ class Person {
     add(g.torso, cloth, torso);
     if (!isRaider || Math.random() < 0.4) add(g.coat, cloth, torso).scale.set(1, 1, 1);
     const head = joint(torso, 0, 0.6, 0);
-    add(g.head, skin, head, 0, 0.1, 0).scale.set(0.95, 1.1, 1);
+    add(g.head, skin, head, 0, 0.1, 0);
+    add(g.neck, skin, torso, 0, 0.62, 0);
+    // a face: brow, nose, ears and eyes
+    add(g.brow, skin, head, 0, 0.145, 0.078);
+    add(g.nose, skin, head, 0, 0.095, 0.108);
+    for (const s of [-1, 1]) {
+      add(g.ear, skin, head, s * 0.092, 0.1, -0.005);
+      add(g.eye, eyeMat, head, s * 0.036, 0.125, 0.098);
+    }
     const style = Math.random();
     if (this.kind === 'brute') {
       add(g.helmet, metal, head, 0, 0.1, 0);
@@ -147,7 +206,7 @@ class Person {
       head.add(slit);
     } else if (isRaider) {
       if (style < 0.5) {
-        add(g.mask, leather, head, 0, 0.06, 0.1);
+        add(g.mask, leather, head, 0, 0.1, 0);
         for (const s of [-1, 1]) add(g.filter, metal, head, s * 0.06, 0.03, 0.15).rotation.x = Math.PI / 2;
       }
       if (style > 0.3) add(g.hood, cloth, head, 0, 0.09, -0.01);
@@ -167,10 +226,13 @@ class Person {
 
     const arm = (side) => {
       const sh = joint(torso, side * 0.24, 0.47, 0);
+      add(g.shoulder, cloth, sh);
       add(g.upper, cloth, sh);
       const el = joint(sh, 0, -0.29, 0);
+      add(g.elbow, cloth, el);
       add(g.fore, cloth, el);
-      add(g.hand, skin, el, 0, -0.29, 0);
+      add(g.hand, skin, el, 0, -0.33, 0.01);
+      add(g.thumb, skin, el, -side * 0.03, -0.31, 0.015).rotation.z = side * 0.3;
       return { sh, el };
     };
     const R = arm(-1), L = arm(1);
@@ -179,8 +241,9 @@ class Person {
       const hip = joint(this.body, s * 0.1, 0.88, 0);
       add(g.thigh, cloth2, hip);
       const knee = joint(hip, 0, -0.42, 0);
+      add(g.knee, cloth2, knee);
       add(g.shin, cloth2, knee);
-      add(g.foot, leather, knee, 0, -0.42, 0.05);
+      add(g.foot, leather, knee, 0, -0.45, 0.05);
       legs.push({ hip, knee });
     }
 

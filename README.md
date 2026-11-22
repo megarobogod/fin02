@@ -4,7 +4,7 @@ The sky tore open and the city fell. Raiders rule its streets, and the last
 survivors hide in the ruins. Now and then, something comes down from the light
 to finish them. One knight still keeps an oath.
 
-A 3D action game with realistic, physically lit graphics. Plain HTML, CSS and
+A first-person 3D action game with realistic, physically lit graphics. Plain HTML, CSS and
 JavaScript with Three.js from a CDN. No build step, and no picture files: every
 brick, window and puddle is worked out by shaders.
 
@@ -24,7 +24,7 @@ Then open <http://localhost:5173>.
 | Control | Does |
 | --- | --- |
 | `W` `A` `S` `D` | Walk (hold `Shift` to run) |
-| Mouse | Look |
+| Mouse | Look (the knight always faces where you look, so `A` and `D` sidestep) |
 | Left click | Slash. Click again mid-swing to chain up to three |
 | Hold left click | Charge a heavy slam, release to strike |
 | Right click | Raise your shield. Raise it just as a blow lands to **parry** |
@@ -101,7 +101,7 @@ wings tear away, and it bursts into a pillar of light. Your wounds close.
 | `src/main.js` | Starting up, input, the game loop, hitstop and slow-motion |
 | `src/materials.js` | The look: lit materials, brick/concrete/road/rust shaders, painted-on windows, sky, sun and shadows |
 | `src/post.js` | Ambient occlusion, bloom, film tone mapping, impact frames, speed lines, cinema bars |
-| `src/shapes.js` | Smooth shapes: lathes, capsules, blades, feathers, wings |
+| `src/shapes.js` | Smooth shape builders: spline lathes, limbs with muscle, bent plates, a lofted sword blade, feathers, wings |
 | `src/world.js` | The city: plan, streaming, buildings, camps, landmarks, collision |
 | `src/knight.js` | You: the model, poses, sword combos, shield, roll, cape |
 | `src/combat.js` | What your sword hits, and lock-on |
@@ -109,7 +109,7 @@ wings tear away, and it bursts into a pillar of light. Your wounds close.
 | `src/angels.js` | The three angels, their weak points, and when they come |
 | `src/cinematic.js` | The angel execution, shot by shot |
 | `src/fx.js` | Sparks, blood, ichor, stains, sword trail, debris |
-| `src/camera.js` | The over-the-shoulder camera |
+| `src/camera.js` | The first-person camera: eye height, head bob, lock-on steering, kneel/roll/fall views |
 | `src/hud.js` | Bars, the angel's health bar, banners, hints, lock-on |
 | `src/audio.js` | Every sound, made in code |
 | `serve.mjs` | The little local web server |

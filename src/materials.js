@@ -511,7 +511,9 @@ export class Materials {
       : new THREE.MeshStandardMaterial(params);
     const flash = opts.flash || { value: 0 };
     const shared = this.shared;
-    // Add a little wear (no two spots quite the same) and the hit flash
+    // Add a little wear (no two spots quite the same) and the hit flash.
+    // Polished things (steel, porcelain, marble) get hardly any; cloth and leather get plenty.
+    const polish = opts.metal ? 0.12 : opts.coat ? 0.1 : (opts.rough ?? 0.8) < 0.7 ? 0.45 : 1.0;
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.tNoise = shared.tNoise;
       shader.uniforms.uTime = shared.uTime;
@@ -523,11 +525,13 @@ export class Materials {
           vec3 an = abs(vON);
           vec2 wuv = an.y > max(an.x, an.z) ? vOP.xz : (an.x > an.z ? vOP.zy : vOP.xy);
           vec4 wear = noise4(wuv * 1.7);
-          diffuseColor.rgb *= 0.8 + 0.3 * wear.g;`)
-        .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = clamp(roughnessFactor + (wear.b - 0.5) * 0.3, 0.05, 1.0);')
+          diffuseColor.rgb *= 1.0 + (wear.g - 0.5) * 0.35 * ${polish.toFixed(2)};`)
+        .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>\nroughnessFactor = clamp(roughnessFactor + (wear.b - 0.5) * 0.3 * ${polish.toFixed(2)}, 0.05, 1.0);`)
+        // tiny wrinkles and grain: bumps worked out from the same noise
+        .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>\nnormal = bumpNormal(-vViewPosition, normal, ((wear.g - 0.5) * 0.004 + (noise4(wuv * 7.0).g - 0.5) * 0.006) * ${polish.toFixed(2)}, faceDirection);`)
         .replace('#include <opaque_fragment>', 'outgoingLight = mix(outgoingLight, vec3(1.8, 1.7, 1.55), uFlash * 0.75);\n#include <opaque_fragment>');
     };
-    mat.customProgramCacheKey = () => 'wear' + (opts.coat ? 'c' : '');
+    mat.customProgramCacheKey = () => 'wear' + polish.toFixed(2);
     if (key) this.cache.set(key, mat);
     return mat;
   }
