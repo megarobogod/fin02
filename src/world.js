@@ -4,40 +4,61 @@
 // The city is a grid: square blocks of buildings with streets between them.
 //   BLOCK  = how wide a block is (metres)
 //   STREET = how wide a street is
-// Some blocks are special: the cathedral plaza in the middle, craters where
-// angels purged whole streets, a dead park, raider camps behind barricades,
-// and hidden courtyards where survivors live.
+//   NB     = how many blocks out from the middle the city goes
+// With NB = 12 that's 25 x 25 blocks: about 1.5 km across.
 //
-// Everything that doesn't move is glued into a few big meshes, so the
-// graphics card can draw the whole city in a handful of goes. The windows
-// aren't real holes: sketch.js paints them on.
+// That's far too much to keep in full detail at once, so the city is
+// STREAMED: only the blocks near you are built properly (every brick,
+// car and lamp post). Further away, each building is a plain stand-in box
+// ("far version"), which is all you can make out through the dust anyway.
+// As you walk, blocks ahead of you are built and blocks behind are thrown away.
+//
+// Every block is built from its own random seed, so it always comes out
+// exactly the same when you come back to it.
+//
+// Districts: tall towers downtown, low houses round the edge, warehouses and
+// chimneys in the industrial patches, and craters where angels purged whole
+// streets. The cathedral plaza is in the middle.
 // =====================================================
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
-
-export const HALF = 270;              // the map runs from -270 to +270
-const RES = 216;                      // ground grid squares per side (2.5m each)
-const CELL = (HALF * 2) / RES;
-const GRID = 16;                      // collision lookup square size
+import { SURF } from './materials.js';
 
 export const BLOCK = 44;
 export const STREET = 14;
 export const PERIOD = BLOCK + STREET; // 58
-const NB = 4;                         // blocks run from -4 to 4 in each direction
+export const NB = 12;                 // blocks run from -12 to 12 in each direction
+export const CITY_EDGE = NB * PERIOD + BLOCK / 2 + 2;   // where the buildings stop
+export const HALF = CITY_EDGE + 110;  // the map (with rubble hills round it) runs from -HALF to +HALF
+const CELL = 2.5;                     // ground grid square size
+const RES = Math.ceil((HALF * 2) / CELL);
+const GRID = 16;                      // collision lookup square size
 const FLOOR = 3.3;                    // storey height (matches the window pattern)
+
+// how near a block has to be (from its middle) to be built in full detail
+const LOAD_RADIUS = 240;
+const UNLOAD_RADIUS = 300;
+const DETAIL_RADIUS = 150;            // small things (rubble, lamps, wires) vanish past this
+const BUILD_MS = 6;                   // time allowed per frame for building blocks
 
 // Special blocks, by grid position [i, j]
 const PLAZA = '0,0';
-const CRATERS = { '-2,1': 30, '3,-2': 26, '1,3': 24 };
+const HAND_CRATERS = { '-2,1': 30, '3,-2': 26, '1,3': 24, '7,5': 64, '-6,-8': 40 };
 const SWORD = '-3,-3';
-const PARKS = ['2,1', '-1,-3'];
-const RAIDER_CAMPS = ['1,1', '-3,2', '2,-3', '3,3', '-4,-1', '4,0', '-1,4'];
-const CIVILIAN_CAMPS = ['-1,-1', '-1,2', '1,-2', '-2,-1', '3,1', '0,-4', '-4,3'];
+const HAND_PARKS = ['2,1', '-1,-3'];
+const HAND_RAIDERS = ['1,1', '-3,2', '2,-3', '3,3', '-4,-1', '4,0', '-1,4'];
+const HAND_CIVILIANS = ['-1,-1', '-1,2', '1,-2', '-2,-1', '3,1', '0,-4', '-4,3'];
+const TOWER_BLOCK = '1,-1';           // the skyscraper that fell across the street
 
-// Colours
-const BRICK = 0x8c6352, CONCRETE = 0xaba59b, PLASTER = 0xc8bca4, DARKSTONE = 0x847d72;
-const STONE = 0xb9b09e, STONE_DARK = 0x958c7c, BARK = 0x5b5046, TIMBER = 0x65564a;
-const RUST = 0x7d5f4c, METAL = 0x707377, ASH = 0x4d4842;
+// Colours (as hex, like a paint chart) and what kind of surface each is
+const BRICK = 0x7a4a3a, CONCRETE = 0x8f8a82, PLASTER = 0xb0a48c, DARKSTONE = 0x6e675d;
+const STONE = 0x9d9483, STONE_DARK = 0x7a7264, BARK = 0x3e342c, TIMBER = 0x5a4836;
+const RUST = 0x6d4a35, METAL = 0x5f6266, ASH = 0x2e2a27, TARP = 0x5d6650;
+const SURF_OF = {
+  [BRICK]: SURF.BRICK, [CONCRETE]: SURF.CONCRETE, [PLASTER]: SURF.PLASTER, [DARKSTONE]: SURF.STONE,
+  [STONE]: SURF.STONE, [STONE_DARK]: SURF.STONE, [BARK]: SURF.WOOD, [TIMBER]: SURF.WOOD,
+  [RUST]: SURF.RUST, [METAL]: SURF.METAL, [ASH]: SURF.ASH,
+};
 
 export function smoothstep(a, b, x) {
   const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
@@ -83,42 +104,113 @@ export class World {
   constructor(game) {
     this.game = game;
     this.scene = game.scene;
-    this.sketch = game.sketch;
-    this.rng = mulberry32(20261121);
-    this.colliders = [];
+    this.mats = game.mats;
     this.grid = new Map();
     this.stamp = 0;
-    this.pieces = [];
     this.raiderCamps = [];
     this.civilianCamps = [];
-    this.fires = [];          // spots where fire particles rise
+    this.fires = [];          // spots where fire particles rise (from loaded blocks)
     this.nodes = [];          // street crossings, for people walking about
+    this.blocks = new Map();  // every block's plan, by "i,j"
+    this.loaded = new Map();  // blocks built in full detail right now
+    this.cur = null;          // the block being built
+    this.spawn = new THREE.Vector3(0, 0, -PERIOD / 2);
+    this.limit = CITY_EDGE - 2;
 
     this.makeCraters();
     this.buildHeights();
     this.buildTerrain();
-    for (let i = -NB; i <= NB; i++) for (let j = -NB; j <= NB; j++) this.buildBlock(i, j);
-    this.buildStreets();
-    this.buildFallenTower();
-    this.buildSkyline();
-    this.mergePieces();
+    this.planCity();
+    this.buildFarCity();
     this.buildSky();
 
     for (let i = -NB; i < NB; i++) for (let j = -NB; j < NB; j++) {
       this.nodes.push({ x: i * PERIOD + PERIOD / 2, z: j * PERIOD + PERIOD / 2 });
     }
-    this.spawn = new THREE.Vector3(0, 0, -PERIOD / 2);
-    this.limit = NB * PERIOD + BLOCK / 2 - 2;
+    // build everything round the start straight away
+    this.stream(this.spawn.x, this.spawn.z, Infinity);
   }
 
   blockCenter(i, j) { return [i * PERIOD, j * PERIOD]; }
 
+  // ================================================================ the plan
+  /**
+   * Decide what every block is (a tower block, a park, a raider camp...) and
+   * lay out its buildings, without building anything yet. This is quick, and
+   * it's what the far stand-in boxes and the camp list come from.
+   */
+  planCity() {
+    for (let i = -NB; i <= NB; i++) for (let j = -NB; j <= NB; j++) {
+      const key = `${i},${j}`;
+      const rng = mulberry32(Math.floor(ihash(i, j, 77) * 4294967296));
+      const [cx, cz] = this.blockCenter(i, j);
+      const r = Math.hypot(i, j);
+      const p = { i, j, key, cx, cz, seed: Math.floor(ihash(i, j, 99) * 4294967296), lots: [], kind: 'normal' };
+      this.blocks.set(key, p);
+
+      // which district are we in?
+      const industrial = r > 5 && fbm(i * 0.22 + 40, j * 0.22, 2, 5) > 0.58;
+      const crater = this.craters.find((c) => Math.hypot(c.x - cx, c.z - cz) < c.r + 8);
+      if (key === PLAZA) p.kind = 'plaza';
+      else if (key === SWORD) p.kind = 'sword';
+      else if (HAND_PARKS.includes(key) || (!crater && r > 3 && ihash(i, j, 5) < 0.06)) p.kind = 'park';
+      else if (HAND_RAIDERS.includes(key) || (!crater && r > 5 && ihash(i, j, 6) < 0.09)) p.kind = 'raider';
+      else if (HAND_CIVILIANS.includes(key) || (!crater && r > 5 && ihash(i, j, 7) < 0.06)) p.kind = 'civ';
+      else if (industrial) p.kind = 'industrial';
+      p.crater = crater;
+      if (p.kind === 'plaza' || p.kind === 'sword' || p.kind === 'park') continue;
+
+      // split the block into lots
+      const inner = BLOCK / 2 - 3;          // pavement is 3m wide
+      const lots = [];
+      const camp = p.kind === 'raider' || p.kind === 'civ';
+      if (p.kind === 'industrial' && rng() < 0.6) lots.push([-inner, -inner, inner, inner]);
+      else if (rng() < 0.3 && !camp && r < 4) lots.push([-inner, -inner, inner, inner]);
+      else {
+        const mx = (rng() - 0.5) * 10, mz = (rng() - 0.5) * 10;
+        lots.push([-inner, -inner, mx - 1, mz - 1], [mx + 1, -inner, inner, mz - 1], [-inner, mz + 1, mx - 1, inner], [mx + 1, mz + 1, inner, inner]);
+      }
+      // camps keep one lot open as a yard
+      const yard = camp ? Math.floor(rng() * lots.length) : -1;
+      const styles = r < 4 ? [CONCRETE, CONCRETE, DARKSTONE, BRICK] : r < 8 ? [BRICK, PLASTER, CONCRETE, DARKSTONE] : [BRICK, PLASTER, PLASTER, BRICK];
+      lots.forEach((l, n) => {
+        const lot = { x0: cx + l[0], z0: cz + l[1], x1: cx + l[2], z1: cz + l[3] };
+        const mx = (lot.x0 + lot.x1) / 2, mz = (lot.z0 + lot.z1) / 2;
+        if (n === yard) {
+          lot.yard = true;
+          (p.kind === 'raider' ? this.raiderCamps : this.civilianCamps).push({ x: mx, z: mz });
+          p.yard = lot;
+          p.lots.push(lot);
+          return;
+        }
+        // height: towers downtown, houses at the edge
+        let floors;
+        if (r < 3.5) floors = 6 + Math.floor(rng() * rng() * 18);
+        else if (r < 7.5) floors = 3 + Math.floor(rng() * rng() * 8);
+        else floors = 1 + Math.floor(rng() * 4);
+        let damage = rng() < 0.55 ? rng() : 0;
+        lot.style = styles[Math.floor(rng() * styles.length)];
+        if (p.kind === 'industrial') { floors = 2 + Math.floor(rng() * 2); lot.style = rng() < 0.5 ? CONCRETE : METAL; lot.warehouse = true; }
+        if (crater) {
+          const d = Math.hypot(mx - crater.x, mz - crater.z);
+          if (d < crater.r * 0.9) { lot.rubble = true; p.lots.push(lot); return; }
+          damage = 1; floors = Math.max(1, Math.floor(floors * 0.5));
+        }
+        lot.floors = floors;
+        lot.damage = damage;
+        p.lots.push(lot);
+      });
+    }
+  }
+
   // ================================================================ ground
   makeCraters() {
     this.craters = [];
-    for (const [key, r] of Object.entries(CRATERS)) {
-      const [i, j] = key.split(',').map(Number);
-      this.craters.push({ x: i * PERIOD + 6, z: j * PERIOD - 4, r, depth: r * 0.16 });
+    const add = (i, j, r) => this.craters.push({ x: i * PERIOD + 6, z: j * PERIOD - 4, r, depth: Math.min(8, r * 0.16) });
+    for (const [key, r] of Object.entries(HAND_CRATERS)) { const [i, j] = key.split(',').map(Number); add(i, j, r); }
+    // more craters scattered through the outer city
+    for (let i = -NB; i <= NB; i++) for (let j = -NB; j <= NB; j++) {
+      if (Math.hypot(i, j) > 5 && ihash(i, j, 3) < 0.045) add(i, j, 18 + ihash(i, j, 4) * 18);
     }
     const [si, sj] = SWORD.split(',').map(Number);
     this.swordSite = [si * PERIOD, sj * PERIOD];
@@ -128,15 +220,15 @@ export class World {
   rawHeight(x, z) {
     let h = (fbm(x * 0.012, z * 0.012, 3) - 0.5) * 1.2;   // the city is nearly flat
     for (const c of this.craters) {
-      const d = Math.hypot(x - c.x, z - c.z);
-      if (d > c.r * 1.8) continue;
-      const q = d / c.r;
+      const dx = x - c.x, dz = z - c.z;
+      if (Math.abs(dx) > c.r * 1.8 || Math.abs(dz) > c.r * 1.8) continue;
+      const q = Math.hypot(dx, dz) / c.r;
       if (q < 1) h -= c.depth * (1 - q * q);
       h += c.depth * 0.35 * Math.exp(-(((q - 1) / 0.25) ** 2));
     }
     // rubble mountains where the city was flattened round the edge
     const e = Math.max(Math.abs(x), Math.abs(z));
-    h += smoothstep(NB * PERIOD + 24, HALF, e) ** 1.4 * 30 * (0.6 + 0.8 * noise(x * 0.05, z * 0.05, 3));
+    h += smoothstep(CITY_EDGE + 20, HALF, e) ** 1.4 * 38 * (0.6 + 0.8 * noise(x * 0.04, z * 0.04, 3));
     return h;
   }
 
@@ -176,49 +268,73 @@ export class World {
     return 'lot';
   }
 
+  /** The ground, in squares of 32 x 32 grid cells (80m), so unseen parts aren't drawn. */
   buildTerrain() {
     const W = RES + 1;
-    const pos = new Float32Array(W * W * 3);
-    const col = new Float32Array(W * W * 3);
-    const asphalt = [0.47, 0.46, 0.45], pave = [0.66, 0.64, 0.6], lot = [0.6, 0.57, 0.5], scorch = [0.3, 0.28, 0.27], rubble = [0.58, 0.54, 0.48];
-    for (let j = 0; j < W; j++) {
-      for (let i = 0; i < W; i++) {
-        const k = j * W + i;
-        const x = -HALF + i * CELL, z = -HALF + j * CELL;
-        pos[k * 3] = x; pos[k * 3 + 1] = this.h[k]; pos[k * 3 + 2] = z;
-        const s = this.surface(x, z);
-        let c = s === 'street' ? asphalt : s === 'pavement' ? pave : lot;
-        if (Math.max(Math.abs(x), Math.abs(z)) > NB * PERIOD + 24) c = rubble;
+    const N = 32;
+    const material = this.mats.ground({ period: PERIOD, block: BLOCK, street: STREET, edge: CITY_EDGE });
+    this.terrain = [];
+    const nrm = new THREE.Vector3();
+    for (let cj = 0; cj < RES; cj += N) for (let ci = 0; ci < RES; ci += N) {
+      const ni = Math.min(N, RES - ci), nj = Math.min(N, RES - cj);
+      const vw = ni + 1, vh = nj + 1;
+      const pos = new Float32Array(vw * vh * 3), nor = new Float32Array(vw * vh * 3), col = new Float32Array(vw * vh * 3);
+      for (let j = 0; j < vh; j++) for (let i = 0; i < vw; i++) {
+        const k = j * vw + i;
+        const gi = ci + i, gj = cj + j;
+        const x = -HALF + gi * CELL, z = -HALF + gj * CELL;
+        pos[k * 3] = x; pos[k * 3 + 1] = this.h[gj * W + gi]; pos[k * 3 + 2] = z;
+        this.normalAt(x, z, nrm);
+        nor[k * 3] = nrm.x; nor[k * 3 + 1] = nrm.y; nor[k * 3 + 2] = nrm.z;
+        // scorched black round craters, a little darker or lighter at random
         let sc = 0;
-        for (const cr of this.craters) sc = Math.max(sc, smoothstep(1.4, 0.5, Math.hypot(x - cr.x, z - cr.z) / cr.r));
-        const v = 0.9 + 0.16 * noise(x * 0.35, z * 0.35, 9) - 0.12 * smoothstep(0.55, 0.75, fbm(x * 0.05, z * 0.05, 2, 4));
-        for (let ch = 0; ch < 3; ch++) col[k * 3 + ch] = lerp(c[ch], scorch[ch], sc * 0.9) * v;
+        for (const cr of this.craters) {
+          if (Math.abs(x - cr.x) > cr.r * 1.5 || Math.abs(z - cr.z) > cr.r * 1.5) continue;
+          sc = Math.max(sc, smoothstep(1.4, 0.4, Math.hypot(x - cr.x, z - cr.z) / cr.r));
+        }
+        const v = (0.9 + 0.2 * noise(x * 0.3, z * 0.3, 9)) * (1 - sc * 0.65);
+        col[k * 3] = v; col[k * 3 + 1] = v * (1 - sc * 0.05); col[k * 3 + 2] = v * (1 - sc * 0.1);
       }
+      const idx = [];
+      for (let j = 0; j < nj; j++) for (let i = 0; i < ni; i++) {
+        const a = j * vw + i, b = a + 1, c = a + vw, d = c + 1;
+        idx.push(a, c, b, b, c, d);
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+      geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      geo.setIndex(idx);
+      geo.computeBoundingSphere();
+      const mesh = new THREE.Mesh(geo, material);
+      mesh.receiveShadow = true;
+      this.scene.add(mesh);
+      this.terrain.push(mesh);
     }
-    const idx = [];
-    for (let j = 0; j < RES; j++) for (let i = 0; i < RES; i++) {
-      const a = j * W + i, b = a + 1, c = a + W, d = c + 1;
-      idx.push(a, c, b, b, c, d);
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
-    geo.setIndex(idx);
-    geo.computeVertexNormals();
-    this.terrain = new THREE.Mesh(geo, this.sketch.fill(0xffffff, { vertexColors: true, scribble: 0.4 }));
-    this.scene.add(this.terrain);
   }
 
   // ================================================================ collision
   addCollider(c) {
     const br = c.type === 'circle' ? c.r : Math.hypot(c.hw, c.hd);
-    this.colliders.push(c);
+    c.cells = [];
     const x0 = Math.floor((c.x - br) / GRID), x1 = Math.floor((c.x + br) / GRID);
     const z0 = Math.floor((c.z - br) / GRID), z1 = Math.floor((c.z + br) / GRID);
     for (let gx = x0; gx <= x1; gx++) for (let gz = z0; gz <= z1; gz++) {
       const key = gx + ',' + gz;
       if (!this.grid.has(key)) this.grid.set(key, []);
       this.grid.get(key).push(c);
+      c.cells.push(key);
+    }
+    if (this.cur) this.cur.colliders.push(c);
+  }
+
+  removeCollider(c) {
+    for (const key of c.cells) {
+      const list = this.grid.get(key);
+      if (!list) continue;
+      const i = list.indexOf(c);
+      if (i >= 0) list.splice(i, 1);
+      if (!list.length) this.grid.delete(key);
     }
   }
 
@@ -274,8 +390,69 @@ export class World {
     return true;
   }
 
+  // ================================================================ streaming
+  /** Build blocks near (x, z) and throw away ones that are far, within a time budget. */
+  stream(x, z, budgetMs = BUILD_MS) {
+    const start = performance.now();
+    // throw away far blocks
+    for (const [key, b] of this.loaded) {
+      if (Math.hypot(b.plan.cx - x, b.plan.cz - z) > UNLOAD_RADIUS) this.unloadBlock(key);
+    }
+    // build the nearest missing ones first
+    const want = [];
+    const bi = Math.round(x / PERIOD), bj = Math.round(z / PERIOD);
+    const span = Math.ceil(LOAD_RADIUS / PERIOD) + 1;
+    for (let i = bi - span; i <= bi + span; i++) for (let j = bj - span; j <= bj + span; j++) {
+      const plan = this.blocks.get(`${i},${j}`);
+      if (!plan || this.loaded.has(plan.key)) continue;
+      const d = Math.hypot(plan.cx - x, plan.cz - z);
+      if (d < LOAD_RADIUS) want.push([d, plan]);
+    }
+    want.sort((a, b) => a[0] - b[0]);
+    for (const [, plan] of want) {
+      this.loadBlock(plan);
+      if (performance.now() - start > budgetMs) break;
+    }
+    // small things only near you
+    for (const b of this.loaded.values()) {
+      if (b.detail) b.detail.visible = Math.hypot(b.plan.cx - x, b.plan.cz - z) < DETAIL_RADIUS;
+    }
+  }
+
+  loadBlock(plan) {
+    this.rng = mulberry32(plan.seed);
+    this.pieces = [];
+    this.cur = { plan, colliders: [], fires: [] };
+    this.buildBlock(plan);
+    this.buildStreetsAround(plan);
+    if (plan.key === TOWER_BLOCK) this.buildFallenTower();
+    const b = this.cur;
+    this.cur = null;
+    // glue the pieces into two meshes: the big stuff, and small things that can vanish when far
+    const big = [], small = [];
+    for (const p of this.pieces) {
+      p.geo.computeBoundingSphere();
+      (p.geo.boundingSphere.radius < 2.2 && !p.keep ? small : big).push(p);
+    }
+    b.main = this.merge(big);
+    b.detail = this.merge(small);
+    this.pieces = null;
+    this.loaded.set(plan.key, b);
+    this.fires.push(...b.fires);
+    this.hideFar(plan, true);
+  }
+
+  unloadBlock(key) {
+    const b = this.loaded.get(key);
+    for (const m of [b.main, b.detail]) if (m) { this.scene.remove(m); m.geometry.dispose(); }
+    for (const c of b.colliders) this.removeCollider(c);
+    this.fires = this.fires.filter((f) => !b.fires.includes(f));
+    this.loaded.delete(key);
+    this.hideFar(b.plan, false);
+  }
+
   // ================================================================ pieces
-  add(geo, color, m, win = 0) {
+  add(geo, color, m, win = 0, surf = SURF_OF[color] ?? SURF.GENERIC) {
     if (m) geo.applyMatrix4(m);
     for (const k of Object.keys(geo.attributes)) if (k !== 'position' && k !== 'normal') geo.deleteAttribute(k);
     if (geo.index === null) {
@@ -285,11 +462,13 @@ export class World {
       for (let i = 0; i < n; i++) idx[i] = i;
       geo.setIndex(new THREE.BufferAttribute(idx, 1));
     }
-    this.pieces.push({ geo, color, win });
+    const piece = { geo, color, win, surf };
+    this.pieces.push(piece);
+    return piece;
   }
-  box(w, h, d, m, color, win = 0) { this.add(new THREE.BoxGeometry(w, h, d), color, m, win); }
-  rbox(w, h, d, r, m, color) { this.add(new RoundedBoxGeometry(w, h, d, 2, r), color, m); }
-  cyl(rt, rb, h, seg, m, color) { this.add(new THREE.CylinderGeometry(rt, rb, h, seg), color, m); }
+  box(w, h, d, m, color, win = 0) { return this.add(new THREE.BoxGeometry(w, h, d), color, m, win); }
+  rbox(w, h, d, r, m, color, surf) { return this.add(new RoundedBoxGeometry(w, h, d, 2, r), color, m, 0, surf); }
+  cyl(rt, rb, h, seg, m, color) { return this.add(new THREE.CylinderGeometry(rt, rb, h, seg), color, m); }
 
   rubble(x, z, count, spread, color = STONE, big = 1) {
     for (let i = 0; i < count; i++) {
@@ -319,8 +498,8 @@ export class World {
    * A building filling a rectangle. It's split into "bays" about 5m across,
    * each with its own height, which is how the broken, jagged tops happen.
    */
-  building(x0, z0, x1, z1, floors, color, damage) {
-    const seed = 1 + this.rng() * 0.99;
+  building(x0, z0, x1, z1, floors, color, damage, windows = true) {
+    const seed = windows ? 1 + this.rng() * 0.99 : 0;
     const nx = Math.max(1, Math.round((x1 - x0) / 5)), nz = Math.max(1, Math.round((z1 - z0) / 5));
     const bw = (x1 - x0) / nx, bd = (z1 - z0) / nz;
     const fullH = floors * FLOOR;
@@ -337,7 +516,7 @@ export class World {
         }
         const cx = x0 + (a + 0.5) * bw, cz = z0 + (b + 0.5) * bd;
         const total = h + (this.heightAt(cx, cz) - g);
-        this.box(bw + 0.02, total, bd + 0.02, mat(cx, g + total / 2, cz), color, seed);
+        this.box(bw + 0.02, total, bd + 0.02, mat(cx, g + total / 2, cz), color, seed).keep = true;
         if (h < fullH - 1) {
           // jagged broken edge and exposed floor slabs
           for (let k = 0; k < 2; k++) {
@@ -345,7 +524,7 @@ export class World {
             this.box(bw * (0.2 + this.rng() * 0.4), ch, bd * (0.2 + this.rng() * 0.4),
               mat(cx + (this.rng() - 0.5) * bw * 0.6, g + total + ch / 2 - 0.2, cz + (this.rng() - 0.5) * bd * 0.6, 0, 0, (this.rng() - 0.5) * 0.4), color);
           }
-          if (this.rng() < 0.5) this.box(bw * 0.9, 0.25, bd * 1.25, mat(cx, g + total - 0.1, cz, (this.rng() - 0.5) * 0.3, 0, (this.rng() - 0.5) * 0.3), CONCRETE);
+          if (this.rng() < 0.5) this.box(bw * 0.9, 0.25, bd * 1.25, mat(cx, g + total - 0.1, cz, (this.rng() - 0.5) * 0.3, 0, (this.rng() - 0.5) * 0.3), CONCRETE).keep = true;
           if (this.rng() < 0.4) this.rubble(cx + (this.rng() - 0.5) * bw * 2, cz + (this.rng() - 0.5) * bd * 2, 3, 4, color);
         }
       }
@@ -353,14 +532,16 @@ export class World {
     // the roofline of intact buildings: a parapet, water tanks, vents
     if (damage < 0.3) {
       const top = g + fullH + (this.heightAt((x0 + x1) / 2, (z0 + z1) / 2) - g);
-      this.box(x1 - x0 + 0.4, 0.5, 0.4, mat((x0 + x1) / 2, top + 0.25, z0 - 0.0), DARKSTONE);
-      this.box(x1 - x0 + 0.4, 0.5, 0.4, mat((x0 + x1) / 2, top + 0.25, z1), DARKSTONE);
-      this.box(0.4, 0.5, z1 - z0 + 0.4, mat(x0, top + 0.25, (z0 + z1) / 2), DARKSTONE);
-      this.box(0.4, 0.5, z1 - z0 + 0.4, mat(x1, top + 0.25, (z0 + z1) / 2), DARKSTONE);
+      for (const piece of [
+        this.box(x1 - x0 + 0.4, 0.5, 0.4, mat((x0 + x1) / 2, top + 0.25, z0), DARKSTONE),
+        this.box(x1 - x0 + 0.4, 0.5, 0.4, mat((x0 + x1) / 2, top + 0.25, z1), DARKSTONE),
+        this.box(0.4, 0.5, z1 - z0 + 0.4, mat(x0, top + 0.25, (z0 + z1) / 2), DARKSTONE),
+        this.box(0.4, 0.5, z1 - z0 + 0.4, mat(x1, top + 0.25, (z0 + z1) / 2), DARKSTONE),
+      ]) piece.keep = true;
       if (this.rng() < 0.6) {
         const tx = lerp(x0, x1, 0.3 + this.rng() * 0.4), tz = lerp(z0, z1, 0.3 + this.rng() * 0.4);
-        this.cyl(1.2, 1.2, 2.4, 14, mat(tx, top + 2.4, tz), TIMBER);
-        this.add(new THREE.ConeGeometry(1.35, 0.8, 14), TIMBER, mat(tx, top + 4, tz));
+        this.cyl(1.2, 1.2, 2.4, 16, mat(tx, top + 2.4, tz), TIMBER).keep = true;
+        this.add(new THREE.ConeGeometry(1.35, 0.8, 16), TIMBER, mat(tx, top + 4, tz)).keep = true;
         for (const [ox, oz] of [[-0.8, -0.8], [0.8, -0.8], [-0.8, 0.8], [0.8, 0.8]]) this.box(0.12, 1.3, 0.12, mat(tx + ox, top + 0.6, tz + oz), METAL);
       }
       if (this.rng() < 0.5) this.rbox(1.6, 1, 1.2, 0.1, mat(lerp(x0, x1, this.rng()), top + 0.5, lerp(z0, z1, this.rng())), METAL);
@@ -368,73 +549,71 @@ export class World {
     this.addCollider({ type: 'box', x: (x0 + x1) / 2, z: (z0 + z1) / 2, hw: (x1 - x0) / 2, hd: (z1 - z0) / 2, rot: 0 });
   }
 
-  buildBlock(i, j) {
-    const key = `${i},${j}`;
-    const [cx, cz] = this.blockCenter(i, j);
+  /** A big shed: ribbed metal or concrete, a roof of rusty sheets, sometimes a chimney. */
+  warehouse(x0, z0, x1, z1, floors, color) {
+    this.building(x0, z0, x1, z1, floors, color, this.rng() < 0.3 ? 0.4 : 0, false);
+    const g = this.heightAt((x0 + x1) / 2, (z0 + z1) / 2);
+    const top = g + floors * FLOOR;
+    // sawtooth roof lights
+    const n = Math.max(1, Math.floor((x1 - x0) / 6));
+    for (let k = 0; k < n; k++) {
+      const x = lerp(x0, x1, (k + 0.5) / n);
+      this.box((x1 - x0) / n * 0.5, 1.6, z1 - z0 - 1, mat(x, top + 0.6, (z0 + z1) / 2, 0, 0, 0.5), RUST).keep = true;
+    }
+    if (this.rng() < 0.45) {
+      // a tall brick chimney: you can see these from right across the city
+      const cx = lerp(x0, x1, 0.2 + this.rng() * 0.6), cz = lerp(z0, z1, 0.2 + this.rng() * 0.6);
+      const h = 22 + this.rng() * 18;
+      this.cyl(0.9, 1.5, h, 16, mat(cx, top + h / 2 - 1, cz), BRICK).keep = true;
+      this.cyl(1.05, 1.05, 0.8, 16, mat(cx, top + h - 1.2, cz), DARKSTONE).keep = true;
+    }
+  }
+
+  buildBlock(plan) {
+    const { cx, cz } = plan;
     const hb = BLOCK / 2;
-    const inner = hb - 3;          // pavement is 3m wide
 
     // kerb stones round the block
     for (const s of [-1, 1]) {
-      this.box(BLOCK, 0.18, 0.3, mat(cx, this.heightAt(cx, cz + s * hb) + 0.05, cz + s * hb), STONE_DARK);
-      this.box(0.3, 0.18, BLOCK, mat(cx + s * hb, this.heightAt(cx + s * hb, cz) + 0.05, cz), STONE_DARK);
+      this.box(BLOCK, 0.18, 0.3, mat(cx, this.heightAt(cx, cz + s * hb) + 0.05, cz + s * hb), STONE_DARK).keep = true;
+      this.box(0.3, 0.18, BLOCK, mat(cx + s * hb, this.heightAt(cx + s * hb, cz) + 0.05, cz), STONE_DARK).keep = true;
     }
 
-    if (key === PLAZA) return this.buildPlaza(cx, cz);
-    if (key === SWORD) return this.buildSwordSite(cx, cz);
-    if (PARKS.includes(key)) return this.buildPark(cx, cz);
+    if (plan.kind === 'plaza') return this.buildPlaza(cx, cz);
+    if (plan.kind === 'sword') return this.buildSwordSite(cx, cz);
+    if (plan.kind === 'park') return this.buildPark(cx, cz);
 
-    const crater = this.craters.find((c) => Math.hypot(c.x - cx, c.z - cz) < c.r + 8);
-    const raider = RAIDER_CAMPS.includes(key);
-    const civ = CIVILIAN_CAMPS.includes(key);
-
-    // split the block into lots
-    const lots = [];
-    if (this.rng() < 0.35 && !raider && !civ) lots.push([-inner, -inner, inner, inner]);
-    else {
-      const mx = (this.rng() - 0.5) * 10, mz = (this.rng() - 0.5) * 10;
-      lots.push([-inner, -inner, mx - 1, mz - 1], [mx + 1, -inner, inner, mz - 1], [-inner, mz + 1, mx - 1, inner], [mx + 1, mz + 1, inner, inner]);
-    }
-    // camps keep one lot open as a yard
-    const yard = raider || civ ? Math.floor(this.rng() * 4) : -1;
-    const styles = [BRICK, CONCRETE, PLASTER, DARKSTONE];
-    lots.forEach((l, n) => {
-      if (n === yard) {
-        const yx = cx + (l[0] + l[2]) / 2, yz = cz + (l[1] + l[3]) / 2;
-        if (raider) this.buildRaiderCamp(yx, yz, (l[2] - l[0]) / 2, (l[3] - l[1]) / 2);
-        else this.buildCivilianCamp(yx, yz, (l[2] - l[0]) / 2, (l[3] - l[1]) / 2);
-        return;
-      }
-      const x0 = cx + l[0], z0 = cz + l[1], x1 = cx + l[2], z1 = cz + l[3];
+    for (const lot of plan.lots) {
+      const { x0, z0, x1, z1 } = lot;
       const mx = (x0 + x1) / 2, mz = (z0 + z1) / 2;
-      let damage = this.rng() < 0.55 ? this.rng() : 0;
-      let floors = 2 + Math.floor(this.rng() * this.rng() * 9);
-      if (crater) {
-        const d = Math.hypot(mx - crater.x, mz - crater.z);
-        if (d < crater.r * 0.9) { this.rubble(mx, mz, 14, Math.min(x1 - x0, z1 - z0), ASH, 1.4); return; }
-        damage = 1; floors = Math.max(1, Math.floor(floors * 0.5));
+      if (lot.yard) {
+        if (plan.kind === 'raider') this.buildRaiderCamp(mx, mz, (x1 - x0) / 2, (z1 - z0) / 2);
+        else this.buildCivilianCamp(mx, mz);
+        continue;
       }
-      this.building(x0, z0, x1, z1, floors, styles[Math.floor(this.rng() * styles.length)], damage);
-      if (damage > 0.5) for (let k = 0; k < 3; k++) this.slab(lerp(x0, x1, this.rng()), lerp(z0, z1, this.rng()) + (this.rng() < 0.5 ? -1 : 1) * ((z1 - z0) / 2 + 2), this.rng() * 6);
-    });
+      if (lot.rubble) { this.rubble(mx, mz, 14, Math.min(x1 - x0, z1 - z0), ASH, 1.4); continue; }
+      if (lot.warehouse) this.warehouse(x0, z0, x1, z1, lot.floors, lot.style);
+      else this.building(x0, z0, x1, z1, lot.floors, lot.style, lot.damage);
+      if (lot.damage > 0.5) for (let k = 0; k < 3; k++) this.slab(lerp(x0, x1, this.rng()), lerp(z0, z1, this.rng()) + (this.rng() < 0.5 ? -1 : 1) * ((z1 - z0) / 2 + 2), this.rng() * 6);
+    }
   }
 
   buildPlaza(cx, cz) {
     // a paved square with the old cathedral in the middle
-    this.box(BLOCK - 1, 0.25, BLOCK - 1, mat(cx, this.heightAt(cx, cz) + 0.05, cz), 0xa9a291);
+    this.box(BLOCK - 1, 0.25, BLOCK - 1, mat(cx, this.heightAt(cx, cz) + 0.05, cz), STONE).keep = true;
     const hw = 8, z0 = cz - 15, z1 = cz + 9;
     this.wall(cx - hw, z0, cx - hw, z1, 12, 1.2, STONE, { broken: true, gaps: 0.15 });
     this.wall(cx + hw, z0, cx + hw, z1, 12, 1.2, STONE, { broken: true, gaps: 0.15 });
     this.wall(cx - hw, z0, cx - 2.6, z0, 15, 1.4, STONE, { broken: true });
     this.wall(cx + 2.6, z0, cx + hw, z0, 15, 1.4, STONE, { broken: true });
     for (const x of [-2.6, 2.6]) {
-      this.cyl(0.65, 0.75, 7, 12, mat(cx + x, 3.5, z0), STONE_DARK);
+      this.cyl(0.65, 0.75, 7, 16, mat(cx + x, 3.5, z0), STONE_DARK).keep = true;
       this.addCollider({ type: 'circle', x: cx + x, z: z0, r: 0.8 });
     }
-    this.add(new THREE.TorusGeometry(2.6, 0.5, 10, 24, Math.PI), STONE_DARK, mat(cx, 7, z0));
+    this.add(new THREE.TorusGeometry(2.6, 0.5, 12, 32, Math.PI), STONE_DARK, mat(cx, 7, z0)).keep = true;
     // rose window ring above the door
-    this.add(new THREE.TorusGeometry(2.4, 0.35, 10, 32), STONE_DARK, mat(cx, 11.5, z0 - 0.2));
-    for (let k = 0; k < 8; k++) this.box(0.18, 4.6, 0.25, mat(cx, 11.5, z0 - 0.2, 0, 0, (k / 8) * Math.PI), STONE_DARK);
+    this.add(new THREE.TorusGeometry(2.4, 0.35, 12, 40), STONE_DARK, mat(cx, 11.5, z0 - 0.2)).keep = true;
+    for (let k = 0; k < 8; k++) this.box(0.18, 4.6, 0.25, mat(cx, 11.5, z0 - 0.2, 0, 0, (k / 8) * Math.PI), STONE_DARK).keep = true;
     // apse
     let prev = [cx - hw, z1];
     for (let k = 1; k <= 6; k++) {
@@ -451,22 +630,22 @@ export class World {
     }
     this.rubble(cx, cz, 22, 14);
     // statue plinth in front: the statue is gone
-    this.rbox(3, 2, 3, 0.15, mat(cx, 1, cz - 19), STONE_DARK);
+    this.rbox(3, 2, 3, 0.15, mat(cx, 1, cz - 19), STONE_DARK, SURF.STONE).keep = true;
     this.addCollider({ type: 'box', x: cx, z: cz - 19, hw: 1.5, hd: 1.5, rot: 0 });
   }
 
-  buildSwordSite(cx, cz) {
+  buildSwordSite() {
     const [x, z] = this.swordSite;
     const g = this.heightAt(x, z);
     const M = mat(x, g, z, 0.16, 0.7, 0.12);
-    const piece = (geo, color, lx, ly, lz) => { geo.translate(lx, ly, lz); this.add(geo, color, M); };
+    const piece = (geo, color, lx, ly, lz, surf) => { geo.translate(lx, ly, lz); this.add(geo, color, M, 0, surf).keep = true; };
     // the blade has a diamond cross-section, so it catches the light
     const blade = new THREE.CylinderGeometry(1.6, 1.8, 42, 4);
     blade.scale(1, 1, 0.3);
-    piece(blade, 0x9c9a94, 0, 13, 0);
-    piece(new RoundedBoxGeometry(16, 1.8, 1.8, 2, 0.4), 0xb39a5c, 0, 34.6, 0);
-    piece(new THREE.CylinderGeometry(0.75, 0.75, 6.2, 12), 0x4d3b2c, 0, 38.6, 0);
-    piece(new THREE.SphereGeometry(1.7, 14, 10), 0xb39a5c, 0, 42.6, 0);
+    piece(blade, 0x8c8a86, 0, 13, 0, SURF.METAL);
+    piece(new RoundedBoxGeometry(16, 1.8, 1.8, 2, 0.4), 0x9c7f45, 0, 34.6, 0, SURF.METAL);
+    piece(new THREE.CylinderGeometry(0.75, 0.75, 6.2, 16), 0x3a2c20, 0, 38.6, 0, SURF.WOOD);
+    piece(new THREE.SphereGeometry(1.7, 20, 14), 0x9c7f45, 0, 42.6, 0, SURF.METAL);
     this.addCollider({ type: 'circle', x, z, r: 2.2 });
     this.rubble(x, z, 24, 26, ASH, 1.3);
     for (let k = 0; k < 6; k++) this.slab(x + (this.rng() - 0.5) * 30, z + (this.rng() - 0.5) * 30, this.rng() * 6, ASH);
@@ -476,9 +655,9 @@ export class World {
     for (let k = 0; k < 26; k++) this.tree(cx + (this.rng() - 0.5) * 36, cz + (this.rng() - 0.5) * 36);
     // a dry fountain
     const g = this.heightAt(cx, cz);
-    this.add(new THREE.TorusGeometry(3.2, 0.35, 8, 28), STONE_DARK, mat(cx, g + 0.4, cz, Math.PI / 2));
-    this.cyl(0.4, 0.6, 2.2, 10, mat(cx, g + 1.1, cz), STONE_DARK);
-    this.cyl(1.2, 0.2, 0.5, 14, mat(cx, g + 2.3, cz), STONE_DARK);
+    this.add(new THREE.TorusGeometry(3.2, 0.35, 10, 36), STONE_DARK, mat(cx, g + 0.4, cz, Math.PI / 2)).keep = true;
+    this.cyl(0.4, 0.6, 2.2, 12, mat(cx, g + 1.1, cz), STONE_DARK);
+    this.cyl(1.2, 0.2, 0.5, 16, mat(cx, g + 2.3, cz), STONE_DARK);
     this.addCollider({ type: 'circle', x: cx, z: cz, r: 3.5 });
     for (let k = 0; k < 6; k++) {
       const a = (k / 6) * Math.PI * 2;
@@ -494,7 +673,6 @@ export class World {
   }
 
   buildRaiderCamp(x, z, hx, hz) {
-    this.raiderCamps.push({ x, z });
     // a ring of junk barricades: sheet metal, tyres, spikes, a burnt car
     const r = Math.min(hx, hz) - 1.5;
     for (let k = 0; k < 14; k++) {
@@ -504,10 +682,10 @@ export class World {
       const g = this.heightAt(px, pz);
       const kind = k % 3;
       if (kind === 0) {
-        this.box(0.08, 2.2, 2.8, mat(px, g + 1.0, pz, 0, -a, (this.rng() - 0.5) * 0.2), RUST);
+        this.box(0.08, 2.2, 2.8, mat(px, g + 1.0, pz, 0, -a, (this.rng() - 0.5) * 0.2), RUST).keep = true;
         this.addCollider({ type: 'box', x: px, z: pz, hw: 0.2, hd: 1.4, rot: -a });
       } else if (kind === 1) {
-        for (let t = 0; t < 3; t++) this.add(new THREE.TorusGeometry(0.42, 0.17, 8, 16), ASH, mat(px, g + 0.18 + t * 0.33, pz, Math.PI / 2, 0, (this.rng() - 0.5) * 0.3));
+        for (let t = 0; t < 3; t++) this.add(new THREE.TorusGeometry(0.42, 0.17, 10, 20), ASH, mat(px, g + 0.18 + t * 0.33, pz, Math.PI / 2, 0, (this.rng() - 0.5) * 0.3));
         this.addCollider({ type: 'circle', x: px, z: pz, r: 0.65 });
       } else {
         for (let t = 0; t < 4; t++) {
@@ -521,18 +699,17 @@ export class World {
     // fire barrels
     for (let k = 0; k < 2; k++) {
       const px = x + (k ? 3 : -3), pz = z + (this.rng() - 0.5) * 4;
-      this.cyl(0.32, 0.3, 0.9, 12, mat(px, this.heightAt(px, pz) + 0.45, pz), RUST);
-      this.fires.push({ x: px, y: this.heightAt(px, pz) + 1.0, z: pz, size: 0.6 });
+      this.cyl(0.32, 0.3, 0.9, 14, mat(px, this.heightAt(px, pz) + 0.45, pz), RUST);
+      this.cur.fires.push({ x: px, y: this.heightAt(px, pz) + 1.0, z: pz, size: 0.6 });
       this.addCollider({ type: 'circle', x: px, z: pz, r: 0.4 });
     }
     // a skull-on-a-pole warning sign
     const sx = x + r + 2, sz = z;
     this.cyl(0.05, 0.06, 2.6, 6, mat(sx, this.heightAt(sx, sz) + 1.3, sz), TIMBER);
-    this.add(new THREE.SphereGeometry(0.17, 10, 8), 0xd8d0bc, mat(sx, this.heightAt(sx, sz) + 2.7, sz));
+    this.add(new THREE.SphereGeometry(0.17, 12, 10), 0xb8ae98, mat(sx, this.heightAt(sx, sz) + 2.7, sz));
   }
 
-  buildCivilianCamp(x, z, hx, hz) {
-    this.civilianCamps.push({ x, z });
+  buildCivilianCamp(x, z) {
     const g = this.heightAt(x, z);
     // tarps strung between poles, bedrolls, and a small fire
     for (let k = 0; k < 4; k++) {
@@ -542,37 +719,38 @@ export class World {
       const p = tarp.attributes.position;
       for (let v = 0; v < p.count; v++) p.setZ(v, Math.sin((p.getX(v) / 3.2 + 0.5) * Math.PI) * 0.35);
       tarp.computeVertexNormals();
-      const colors = [0x6f7a62, 0x8a6e52, 0x6a6f7a, 0x8c8473];
-      this.add(tarp, colors[k], mat(px, g + 1.3, pz, -0.9, -a + Math.PI / 2, 0));
-      const back = tarp.clone();
-      this.add(back, colors[k], mat(px, g + 1.3, pz, -0.9 + Math.PI, -a + Math.PI / 2, 0));
+      const colors = [TARP, 0x6e5640, 0x50555e, 0x6c665a];
+      this.add(tarp, colors[k], mat(px, g + 1.3, pz, -0.9, -a + Math.PI / 2, 0), 0, SURF.CLOTH);
+      this.add(tarp.clone(), colors[k], mat(px, g + 1.3, pz, -0.9 + Math.PI, -a + Math.PI / 2, 0), 0, SURF.CLOTH);
       this.box(0.07, 2.2, 0.07, mat(px + Math.cos(a) * 1.2, g + 1.1, pz + Math.sin(a) * 1.2), TIMBER);
-      this.rbox(0.8, 0.18, 1.9, 0.08, mat(px - Math.cos(a) * 0.6, g + 0.09, pz - Math.sin(a) * 0.6, 0, -a), 0x7d6b5a);
+      this.rbox(0.8, 0.18, 1.9, 0.08, mat(px - Math.cos(a) * 0.6, g + 0.09, pz - Math.sin(a) * 0.6, 0, -a), 0x5e4e40, SURF.CLOTH);
     }
     for (let k = 0; k < 8; k++) {
       const a = (k / 8) * Math.PI * 2;
       this.add(new THREE.DodecahedronGeometry(0.18, 0), STONE_DARK, mat(x + Math.cos(a) * 0.7, g + 0.1, z + Math.sin(a) * 0.7));
     }
-    this.fires.push({ x, y: g + 0.25, z, size: 0.5 });
-    this.rbox(0.6, 0.5, 0.6, 0.06, mat(x + 2.5, g + 0.25, z - 1.5, 0, 0.4), TIMBER);
+    this.cur.fires.push({ x, y: g + 0.25, z, size: 0.5 });
+    this.rbox(0.6, 0.5, 0.6, 0.06, mat(x + 2.5, g + 0.25, z - 1.5, 0, 0.4), TIMBER, SURF.WOOD);
   }
 
   // ================================================================ street furniture
   car(x, z, ry, burnt = this.rng() < 0.7) {
     const g = this.heightAt(x, z);
-    const cols = [0x6e4f45, 0x5d6670, 0x7a7466, 0x4f5b4c, 0x8a7d5e];
-    const c = burnt ? 0x5a4c44 : cols[Math.floor(this.rng() * cols.length)];
+    const cols = [0x5a2a22, 0x3d4a58, 0x6e6a5e, 0x34402f, 0x7a6b45, 0x8a8a86];
+    const c = burnt ? 0x2b2522 : cols[Math.floor(this.rng() * cols.length)];
+    const body = burnt ? SURF.RUST : SURF.PAINT;
     const tilt = burnt ? (this.rng() - 0.5) * 0.12 : 0;
     const M = mat(x, g, z, tilt, ry, tilt);
-    const part = (geo, color, lx, ly, lz) => { geo.translate(lx, ly, lz); this.add(geo, color, M); };
-    part(new RoundedBoxGeometry(1.9, 0.75, 4.3, 2, 0.22), c, 0, 0.72, 0);
-    part(new RoundedBoxGeometry(1.7, 0.62, 2.3, 2, 0.24), c, 0, 1.35, -0.2);
-    part(new THREE.BoxGeometry(1.72, 0.42, 0.06), 0x2a2622, 0, 1.38, 0.97);     // windscreen hole
+    const part = (geo, color, lx, ly, lz, surf) => { geo.translate(lx, ly, lz); return this.add(geo, color, M, 0, surf); };
+    part(new RoundedBoxGeometry(1.9, 0.75, 4.3, 3, 0.22), c, 0, 0.72, 0, body).keep = true;
+    part(new RoundedBoxGeometry(1.7, 0.62, 2.3, 3, 0.24), c, 0, 1.35, -0.2, body).keep = true;
+    part(new THREE.BoxGeometry(1.72, 0.42, 0.06), 0x0c0c0d, 0, 1.38, 0.97, SURF.ASH);     // windscreen hole
+    part(new THREE.BoxGeometry(1.72, 0.4, 0.06), 0x0c0c0d, 0, 1.36, -1.37, SURF.ASH);     // back window
     for (const [wx, wz] of [[-0.88, 1.35], [0.88, 1.35], [-0.88, -1.35], [0.88, -1.35]]) {
       if (burnt && this.rng() < 0.3) continue;
-      const w = new THREE.CylinderGeometry(0.36, 0.36, 0.24, 14);
+      const w = new THREE.CylinderGeometry(0.36, 0.36, 0.24, 18);
       w.rotateZ(Math.PI / 2);
-      part(w, ASH, wx, 0.36, wz);
+      part(w, 0x1a1a1a, wx, 0.36, wz, SURF.ASH);
     }
     this.addCollider({ type: 'box', x, z, hw: 0.95, hd: 2.15, rot: ry });
   }
@@ -582,15 +760,14 @@ export class World {
     const lean = bent ? 0.3 + this.rng() * 0.5 : 0;
     const M = mat(x, g, z, lean, ry, 0);
     const part = (geo, color, lx, ly, lz) => { geo.translate(lx, ly, lz); this.add(geo, color, M); };
-    part(new THREE.CylinderGeometry(0.09, 0.13, 6, 8), METAL, 0, 3, 0);
-    const arm = new THREE.TorusGeometry(0.7, 0.05, 6, 10, Math.PI / 2);
-    part(arm, METAL, 0.7, 6, 0);
-    part(new THREE.CylinderGeometry(0.15, 0.3, 0.3, 10), METAL, 1.4, 6.55, 0);
+    part(new THREE.CylinderGeometry(0.09, 0.13, 6, 10), METAL, 0, 3, 0);
+    part(new THREE.TorusGeometry(0.7, 0.05, 6, 12, Math.PI / 2), METAL, 0.7, 6, 0);
+    part(new THREE.CylinderGeometry(0.15, 0.3, 0.3, 12), METAL, 1.4, 6.55, 0);
   }
 
   pole(x, z) {
     const g = this.heightAt(x, z);
-    this.cyl(0.13, 0.17, 9, 8, mat(x, g + 4.5, z), TIMBER);
+    this.cyl(0.13, 0.17, 9, 10, mat(x, g + 4.5, z), TIMBER).keep = true;
     this.box(2.4, 0.16, 0.16, mat(x, g + 8.3, z), TIMBER);
     return new THREE.Vector3(x, g + 8.3, z);
   }
@@ -601,57 +778,55 @@ export class World {
       const t = i / 10;
       pts.push(new THREE.Vector3(lerp(a.x, b.x, t), lerp(a.y, b.y, t) - Math.sin(t * Math.PI) * 1.6, lerp(a.z, b.z, t)));
     }
-    this.add(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 12, 0.03, 4, false), 0x2a2622);
+    this.add(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 12, 0.03, 4, false), 0x111111, null, 0, SURF.ASH);
   }
 
-  buildStreets() {
-    const lim = NB * PERIOD + BLOCK / 2;
-    for (let s = -NB; s < NB; s++) {
-      const c = s * PERIOD + PERIOD / 2;          // the street's centre line
-      for (const dir of [0, 1]) {
-        const P = (along, across) => (dir === 0 ? [along, c + across] : [c + across, along]);
-        const ry = dir === 0 ? Math.PI / 2 : 0;
-        // dashed centre line
-        for (let t = -lim; t < lim; t += 6) {
-          if (this.rng() < 0.2) continue;
-          const [x, z] = P(t, 0);
-          if (this.surface(x, z) !== 'street') continue;
-          this.box(0.18, 0.03, 2.4, mat(x, this.heightAt(x, z) + 0.02, z, 0, ry), 0xcfc6b0);
-        }
-        // lamp posts on alternate sides
-        for (let t = -lim + 9; t < lim; t += 19) {
-          const side = Math.floor(t / 19) % 2 ? 1 : -1;
-          const [x, z] = P(t, side * (STREET / 2 + 0.6));
-          if (this.surface(x, z) === 'street') continue;
-          this.lamp(x, z, dir === 0 ? (side > 0 ? 0 : Math.PI) : (side > 0 ? -Math.PI / 2 : Math.PI / 2), this.rng() < 0.3);
-        }
-        // parked and crashed cars
-        for (let t = -lim; t < lim; t += 8 + this.rng() * 14) {
-          if (this.rng() < 0.45) continue;
-          const crashed = this.rng() < 0.3;
-          const across = crashed ? (this.rng() - 0.5) * 6 : (this.rng() < 0.5 ? -1 : 1) * (STREET / 2 - 1.5);
-          const [x, z] = P(t, across);
-          if (this.surface(x, z) !== 'street') continue;
-          if (Math.hypot(x - this.spawn?.x || 0, z + PERIOD / 2) < 6) continue;
-          this.car(x, z, ry + (crashed ? (this.rng() - 0.5) * 1.6 : (this.rng() - 0.5) * 0.1));
-        }
-        // debris in the road
-        for (let k = 0; k < 10; k++) {
-          const [x, z] = P((this.rng() * 2 - 1) * lim, (this.rng() - 0.5) * STREET);
-          this.rubble(x, z, 3, 2.5, this.rng() < 0.5 ? CONCRETE : BRICK);
-        }
+  /**
+   * The near half of each of the four streets round a block: parked and
+   * crashed cars, lamp posts on the pavement, rubbish, telegraph poles.
+   */
+  buildStreetsAround(plan) {
+    const { cx, cz, i, j } = plan;
+    const hb = BLOCK / 2;
+    // side: which way is "out" from the block (+x, -x, +z, -z)
+    for (const [ox, oz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const ry = ox ? 0 : Math.PI / 2;                 // cars face along the street
+      // P(along, out): along the side, and out from the kerb into the street
+      const P = (along, out) => (ox ? [cx + ox * (hb + out), cz + along] : [cx + along, cz + oz * (hb + out)]);
+      // parked and crashed cars
+      for (let t = -hb; t < hb; t += 7 + this.rng() * 12) {
+        if (this.rng() < 0.45) continue;
+        const crashed = this.rng() < 0.3;
+        const [x, z] = P(t, crashed ? 2 + this.rng() * 4 : 1.4);
+        if (this.surface(x, z) !== 'street' || Math.hypot(x - this.spawn.x, z - this.spawn.z) < 8) continue;
+        this.car(x, z, ry + (this.rng() < 0.5 ? Math.PI : 0) + (crashed ? (this.rng() - 0.5) * 1.6 : (this.rng() - 0.5) * 0.08));
       }
-      // telegraph poles and sagging wires down every other street
-      if (s % 2 === 0) {
+      // lamp posts on the pavement edge
+      for (let t = -hb + 8; t < hb - 4; t += 18) {
+        const [x, z] = P(t, -0.6);
+        const face = ox ? (ox > 0 ? 0 : Math.PI) : (oz > 0 ? -Math.PI / 2 : Math.PI / 2);
+        this.lamp(x, z, face, this.rng() < 0.3);
+      }
+      // rubbish in the road
+      for (let k = 0; k < 4; k++) {
+        const [x, z] = P((this.rng() - 0.5) * BLOCK, this.rng() * STREET * 0.5);
+        this.rubble(x, z, 3, 2.5, this.rng() < 0.5 ? CONCRETE : BRICK);
+      }
+      // telegraph poles and sagging wires on the south side of every other row
+      if (oz === -1 && j % 2 === 0) {
         let prev = null;
-        for (let t = -lim; t < lim; t += 24) {
-          const x = t, z = c + STREET / 2 + 1.6;
-          if (this.surface(x, z) === 'street') { prev = null; continue; }
+        for (let t = -hb + 4; t < hb; t += 20) {
+          const [x, z] = P(t, -1.4);
           const top = this.pole(x, z);
-          if (prev && this.rng() < 0.8) this.wire(prev, top);
+          if (prev && this.rng() < 0.85) this.wire(prev, top);
           prev = top;
         }
       }
+    }
+    // the odd wreck or barricade in the crossroads at one corner
+    if (i < NB && j < NB && this.rng() < 0.3) {
+      const x = cx + PERIOD / 2 + (this.rng() - 0.5) * 6, z = cz + PERIOD / 2 + (this.rng() - 0.5) * 6;
+      if (Math.hypot(x - this.spawn.x, z - this.spawn.z) > 10) this.car(x, z, this.rng() * 6, true);
     }
   }
 
@@ -660,23 +835,11 @@ export class World {
     const x = 1.5 * PERIOD, z = -1 * PERIOD + 10;
     const ry = 0.55;
     const g = this.heightAt(x, z);
-    this.box(12, 12, 64, mat(x, g + 4, z, 0.06, ry, 0.12), CONCRETE, 1.42);
+    this.box(12, 12, 64, mat(x, g + 4, z, 0.06, ry, 0.12), CONCRETE, 1.42).keep = true;
     this.rubble(x - 10, z - 20, 30, 18, CONCRETE, 1.3);
     this.rubble(x + 12, z + 24, 30, 16, CONCRETE, 1.3);
     for (const t of [-0.4, -0.2, 0, 0.2, 0.4]) {
       this.addCollider({ type: 'box', x: x + Math.sin(ry) * 64 * t, z: z + Math.cos(ry) * 64 * t, hw: 6, hd: 7, rot: ry });
-    }
-  }
-
-  // far-off ruins beyond the edge, so the city seems to go on for ever
-  buildSkyline() {
-    for (let k = 0; k < 70; k++) {
-      const a = (k / 70) * Math.PI * 2 + this.rng() * 0.05;
-      const d = HALF + 40 + this.rng() * 120;
-      const x = Math.cos(a) * d, z = Math.sin(a) * d;
-      const h = 20 + this.rng() * 70;
-      const w = 10 + this.rng() * 20;
-      this.box(w, h, w, mat(x, h / 2 + 10, z, 0, this.rng() * 3, (this.rng() - 0.5) * 0.1), CONCRETE, 1 + this.rng() * 0.9);
     }
   }
 
@@ -693,26 +856,27 @@ export class World {
       const hh = height * (opts.broken ? 0.3 + this.rng() * 0.7 : 1);
       const base = this.heightAt(cx, cz) - 0.6;
       const total = hh + 0.6;
-      this.box(thick, total, seg + 0.03, mat(cx, base + total / 2, cz, 0, ry, 0), color);
+      this.box(thick, total, seg + 0.03, mat(cx, base + total / 2, cz, 0, ry, 0), color).keep = true;
       this.addCollider({ type: 'box', x: cx, z: cz, hw: thick / 2, hd: seg / 2, rot: ry });
     }
   }
   column(x, z, h, r, color = STONE) {
     const g = this.heightAt(x, z) - 0.2;
-    this.rbox(r * 2.6, 0.6, r * 2.6, 0.08, mat(x, g + 0.3, z), STONE_DARK);
-    this.cyl(r * 0.92, r, h, 14, mat(x, g + 0.6 + h / 2, z), color);
-    if (h > 7) this.rbox(r * 2.4, 0.5, r * 2.4, 0.08, mat(x, g + 0.6 + h + 0.25, z), STONE_DARK);
+    this.rbox(r * 2.6, 0.6, r * 2.6, 0.08, mat(x, g + 0.3, z), STONE_DARK, SURF.STONE).keep = true;
+    this.cyl(r * 0.92, r, h, 16, mat(x, g + 0.6 + h / 2, z), color).keep = true;
+    if (h > 7) this.rbox(r * 2.4, 0.5, r * 2.4, 0.08, mat(x, g + 0.6 + h + 0.25, z), STONE_DARK, SURF.STONE).keep = true;
     this.addCollider({ type: 'circle', x, z, r: r + 0.25 });
   }
   fallenColumn(x, z, len, r, ry, color = STONE) {
     const g = this.heightAt(x, z);
-    this.cyl(r, r, len, 14, mat(x, g + r * 0.8, z, Math.PI / 2, ry, 0), color);
+    this.cyl(r, r, len, 16, mat(x, g + r * 0.8, z, Math.PI / 2, ry, 0), color).keep = true;
     for (const t of [-0.35, 0, 0.35]) this.addCollider({ type: 'circle', x: x + Math.sin(ry) * len * t, z: z + Math.cos(ry) * len * t, r: r + 0.2 });
   }
   tree(x, z) {
+    // dead trees: a bare trunk and a few crooked branches
     const g = this.heightAt(x, z);
     const h = 4 + this.rng() * 5, r = 0.2 + this.rng() * 0.18;
-    this.cyl(r * 0.45, r, h, 8, mat(x, g + h / 2 - 0.3, z, (this.rng() - 0.5) * 0.1, 0, (this.rng() - 0.5) * 0.1), BARK);
+    this.cyl(r * 0.45, r, h, 9, mat(x, g + h / 2 - 0.3, z, (this.rng() - 0.5) * 0.1, 0, (this.rng() - 0.5) * 0.1), BARK).keep = true;
     const nb = 3 + Math.floor(this.rng() * 3);
     for (let b = 0; b < nb; b++) {
       const L = 1.2 + this.rng() * 1.8;
@@ -724,55 +888,120 @@ export class World {
     this.addCollider({ type: 'circle', x, z, r: r + 0.15 });
   }
 
-  /** Glue every piece into big meshes, one per 80m square. */
-  mergePieces() {
-    const CH = 80;
-    const groups = new Map();
-    for (const p of this.pieces) {
-      p.geo.computeBoundingSphere();
-      const c = p.geo.boundingSphere.center;
-      const key = Math.floor((c.x + HALF + 400) / CH) + ',' + Math.floor((c.z + HALF + 400) / CH);
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(p);
-    }
-    const fillMat = this.sketch.fill(0xffffff, { vertexColors: true, scribble: 0.2 });
+  /** Glue pieces into one mesh: thousands of shapes drawn in a single go. */
+  merge(list) {
+    if (!list.length) return null;
+    let nv = 0, ni = 0;
+    for (const p of list) { nv += p.geo.attributes.position.count; ni += p.geo.index.count; }
+    const pos = new Float32Array(nv * 3), nor = new Float32Array(nv * 3);
+    const col = new Float32Array(nv * 3), win = new Float32Array(nv), surf = new Float32Array(nv);
+    const idx = new Uint32Array(ni);
     const tint = new THREE.Color();
-    for (const list of groups.values()) {
-      let nv = 0, ni = 0;
-      for (const p of list) { nv += p.geo.attributes.position.count; ni += p.geo.index.count; }
-      const pos = new Float32Array(nv * 3), nor = new Float32Array(nv * 3);
-      const col = new Float32Array(nv * 3), win = new Float32Array(nv);
-      const idx = new Uint32Array(ni);
-      let vo = 0, io = 0;
-      for (const p of list) {
-        const g = p.geo, n = g.attributes.position.count;
-        pos.set(g.attributes.position.array, vo * 3);
-        nor.set(g.attributes.normal.array, vo * 3);
-        tint.set(p.color).multiplyScalar(0.93 + this.rng() * 0.12);
-        for (let i = 0; i < n; i++) {
-          col[(vo + i) * 3] = tint.r; col[(vo + i) * 3 + 1] = tint.g; col[(vo + i) * 3 + 2] = tint.b;
-          win[vo + i] = p.win;
-        }
-        const src = g.index.array;
-        for (let i = 0; i < src.length; i++) idx[io + i] = src[i] + vo;
-        io += src.length;
-        vo += n;
-        g.dispose();
+    let vo = 0, io = 0;
+    for (const p of list) {
+      const g = p.geo, n = g.attributes.position.count;
+      pos.set(g.attributes.position.array, vo * 3);
+      nor.set(g.attributes.normal.array, vo * 3);
+      tint.set(p.color).multiplyScalar(0.9 + this.rng() * 0.2);
+      for (let i = 0; i < n; i++) {
+        col[(vo + i) * 3] = tint.r; col[(vo + i) * 3 + 1] = tint.g; col[(vo + i) * 3 + 2] = tint.b;
+        win[vo + i] = p.win;
+        surf[vo + i] = p.surf;
       }
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-      geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
-      geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
-      geo.setAttribute('win', new THREE.BufferAttribute(win, 1));
-      geo.setIndex(new THREE.BufferAttribute(idx, 1));
-      geo.computeBoundingSphere();
-      this.scene.add(new THREE.Mesh(geo, fillMat));
+      const src = g.index.array;
+      for (let i = 0; i < src.length; i++) idx[io + i] = src[i] + vo;
+      io += src.length;
+      vo += n;
+      g.dispose();
     }
-    this.pieces = null;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    geo.setAttribute('win', new THREE.BufferAttribute(win, 1));
+    geo.setAttribute('surf', new THREE.BufferAttribute(surf, 1));
+    geo.setIndex(new THREE.BufferAttribute(idx, 1));
+    geo.computeBoundingSphere();
+    const mesh = new THREE.Mesh(geo, this.mats.city());
+    mesh.castShadow = mesh.receiveShadow = true;
+    this.scene.add(mesh);
+    return mesh;
+  }
+
+  // ================================================================ far away
+  /**
+   * One plain box per building for the whole city, drawn in a single go
+   * (an "instanced" mesh). When a block is built in full detail, its boxes
+   * are shrunk to nothing so they don't poke through.
+   */
+  buildFarCity() {
+    const boxes = [];   // [x, y, z, w, h, d, colour, windows, surf, blockKey]
+    for (const p of this.blocks.values()) {
+      for (const lot of p.lots) {
+        if (lot.yard || lot.rubble) continue;
+        const h = lot.floors * FLOOR * (lot.damage > 0.5 ? 0.7 : lot.damage > 0 ? 0.9 : 1);
+        const g = this.heightAt((lot.x0 + lot.x1) / 2, (lot.z0 + lot.z1) / 2) - 0.4;
+        boxes.push([(lot.x0 + lot.x1) / 2, g + h / 2, (lot.z0 + lot.z1) / 2, lot.x1 - lot.x0, h, lot.z1 - lot.z0, lot.style, lot.warehouse ? 0 : 1.5, SURF_OF[lot.style], p.key]);
+      }
+      if (p.kind === 'plaza') boxes.push([p.cx, 6, p.cz - 3, 16, 12, 24, STONE, 0, SURF.STONE, p.key]);
+    }
+    // landmarks you can see from anywhere: the giant sword, and the fallen tower
+    const [sx, sz] = this.swordSite;
+    boxes.push([sx, 21, sz, 2.4, 42, 1.2, 0x8c8a86, 0, SURF.METAL, SWORD]);
+    boxes.push([sx, 34.6, sz, 16, 1.8, 1.8, 0x9c7f45, 0, SURF.METAL, SWORD]);
+    boxes.push([1.5 * PERIOD, 4, -PERIOD + 10, 12, 12, 64, CONCRETE, 1.42, SURF.CONCRETE, TOWER_BLOCK, 0.55]);
+    // ruins beyond the edge, so the city seems to go on for ever
+    const rng = mulberry32(5);
+    for (let k = 0; k < 120; k++) {
+      const a = (k / 120) * Math.PI * 2 + rng() * 0.05;
+      const d = HALF + 30 + rng() * 140;
+      const h = 20 + rng() * 70, w = 10 + rng() * 22;
+      boxes.push([Math.cos(a) * d, h / 2 + 20, Math.sin(a) * d, w, h, w, CONCRETE, 1 + rng() * 0.9, SURF.CONCRETE, null, rng() * 3]);
+    }
+
+    const geo = new THREE.BoxGeometry(1, 1, 1);
+    const winAttr = new THREE.InstancedBufferAttribute(new Float32Array(boxes.length), 1);
+    const surfAttr = new THREE.InstancedBufferAttribute(new Float32Array(boxes.length), 1);
+    geo.setAttribute('win', winAttr);
+    geo.setAttribute('surf', surfAttr);
+    const far =new THREE.InstancedMesh(geo, this.mats.farCity(), boxes.length);
+    far.frustumCulled = false;
+    this.farBoxes = boxes;
+    this.farByBlock = new Map();
+    const c = new THREE.Color();
+    boxes.forEach((b, n) => {
+      far.setMatrixAt(n, this.farMatrix(b));
+      far.setColorAt(n, c.set(b[6]));
+      winAttr.array[n] = b[7] ? 1 + ((n * 0.618) % 0.99) : 0;
+      surfAttr.array[n] = b[8];
+      if (b[9]) {
+        if (!this.farByBlock.has(b[9])) this.farByBlock.set(b[9], []);
+        this.farByBlock.get(b[9]).push(n);
+      }
+    });
+    this.far = far;
+    this.scene.add(far);
+  }
+
+  farMatrix(b) {
+    const m = new THREE.Matrix4();
+    _e.set(0, b[10] || 0, 0);
+    _q.setFromEuler(_e);
+    return m.compose(new THREE.Vector3(b[0], b[1], b[2]), _q, new THREE.Vector3(b[3], b[4], b[5]));
+  }
+
+  /** Hide (or show again) the stand-in boxes of a block. */
+  hideFar(plan, hide) {
+    const list = this.farByBlock.get(plan.key);
+    if (!list) return;
+    const zero = new THREE.Matrix4().makeScale(0, 0, 0);
+    for (const n of list) this.far.setMatrixAt(n, hide ? zero : this.farMatrix(this.farBoxes[n]));
+    this.far.instanceMatrix.needsUpdate = true;
   }
 
   buildSky() {
-    this.sky = new THREE.Mesh(new THREE.SphereGeometry(800, 32, 16), this.sketch.makeSky(new THREE.Vector3(0.25, 0.5, 1)));
+    this.skyMat = this.mats.makeSky(new THREE.Vector3(0.25, 0.5, 1));
+    this.sky = new THREE.Mesh(new THREE.SphereGeometry(500, 48, 24), this.skyMat);
     this.sky.renderOrder = -1;
     this.sky.frustumCulled = false;
     this.scene.add(this.sky);
@@ -780,5 +1009,11 @@ export class World {
 
   update(camera) {
     this.sky.position.copy(camera.position);
+    this.stream(camera.position.x, camera.position.z);
+    // don't bother drawing ground that's lost in the dust
+    for (const t of this.terrain) {
+      const s = t.geometry.boundingSphere;
+      t.visible = Math.hypot(s.center.x - camera.position.x, s.center.z - camera.position.z) < 700;
+    }
   }
 }

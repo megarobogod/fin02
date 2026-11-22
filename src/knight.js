@@ -134,11 +134,18 @@ export class Knight {
 
   // ================================================================ model
   build() {
-    const S = this.game.sketch;
-    const STEEL = 0x9a9da2, DARK = 0x5d6066, CLOTH = 0x7d2a22, LEATHER = 0x5a4532, MAIL = 0x7b7d80, PALE = 0xd8cfb8;
+    const S = this.game.mats;
+    const STEEL = 0x9a9da2, DARK = 0x4a4d52, CLOTH = 0x6a1c16, LEATHER = 0x3b2a1c, MAIL = 0x7b7d80, PALE = 0xcfc4ac;
+    const BRASS = 0xb39a5c, BLADE = 0xd4d7da, FULLER = 0x8f9296, SHIELD = 0x6b2a20;
+    // how each colour behaves under light: metal or not, and how polished
+    const LOOK = {
+      [STEEL]: { metal: 1, rough: 0.32 }, [DARK]: { metal: 1, rough: 0.45 }, [MAIL]: { metal: 1, rough: 0.55 },
+      [BRASS]: { metal: 1, rough: 0.35 }, [BLADE]: { metal: 1, rough: 0.18 }, [FULLER]: { metal: 1, rough: 0.3 },
+      [CLOTH]: { rough: 0.95 }, [PALE]: { rough: 0.9 }, [LEATHER]: { rough: 0.65 }, [SHIELD]: { rough: 0.6 },
+    };
     // put a shape on a joint at (x, y, z), optionally turned
     const put = (geo, tint, parent, x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0) => {
-      const m = S.part(geo, tint);
+      const m = S.part(geo, tint, LOOK[tint] || {});
       m.position.set(x, y, z);
       m.rotation.set(rx, ry, rz);
       parent.add(m);
@@ -173,7 +180,7 @@ export class Knight {
     put(rbox(0.25, 0.055, 0.012, 0.005), PALE, torso, 0, 0.32, 0.205);
     // belt with a buckle
     put(new THREE.TorusGeometry(0.235, 0.03, 8, 28), LEATHER, torso, 0, 0.0, 0, Math.PI / 2, 0, 0).scale.set(1, 0.76, 1);
-    put(rbox(0.07, 0.06, 0.03, 0.01), 0xb39a5c, torso, 0, 0.0, 0.18);
+    put(rbox(0.07, 0.06, 0.03, 0.01), BRASS, torso, 0, 0.0, 0.18);
     // gorget (neck guard)
     put(lathe([[0.13, 0], [0.12, 0.06], [0.09, 0.1]], 16), DARK, torso, 0, 0.58, 0);
     // layered pauldrons
@@ -226,8 +233,8 @@ export class Knight {
     // crossguard: a bar that curves slightly toward the blade
     const guardCurve = new THREE.QuadraticBezierCurve3(new THREE.Vector3(-0.18, -0.08, 0), new THREE.Vector3(0, -0.12, 0), new THREE.Vector3(0.18, -0.08, 0));
     put(new THREE.TubeGeometry(guardCurve, 12, 0.017, 8), DARK, wristR);
-    put(bladeGeo(1.04, 0.07), 0xe2e4e6, wristR, 0, -0.12, 0);
-    put(rbox(0.012, 0.75, 0.012, 0.004), 0x8f9296, wristR, 0, -0.5, 0.004);      // the fuller (groove)
+    put(bladeGeo(1.04, 0.07), BLADE, wristR, 0, -0.12, 0);
+    put(rbox(0.012, 0.75, 0.012, 0.004), FULLER, wristR, 0, -0.5, 0.004);      // the fuller (groove)
     this.bladeBase = new THREE.Object3D(); this.bladeBase.position.y = -0.14; wristR.add(this.bladeBase);
     this.bladeTip = new THREE.Object3D(); this.bladeTip.position.y = -1.17; wristR.add(this.bladeTip);
 
@@ -245,14 +252,14 @@ export class Knight {
     const full = [...outline, ...outline.slice(0, -1).reverse().map(([x, y]) => [-x, y])];
     const face = plate(full, 0.04, 0.012);
     face.rotateY(Math.PI / 2);
-    put(face, 0x6b2a20, shield);
+    put(face, SHIELD, shield);
     const rimPts = full.map(([x, y]) => [x * 1.06, y * 1.06 + 0.005]);
     const rim = plate(rimPts, 0.02, 0.008, [full.map(([x, y]) => [x * 0.98, y * 0.98]).reverse()]);
     rim.rotateY(Math.PI / 2);
     put(rim, DARK, shield, 0.022, 0, 0);
     put(rbox(0.018, 0.66, 0.08, 0.008), PALE, shield, 0.03, 0.03, 0);
     put(rbox(0.018, 0.08, 0.52, 0.008), PALE, shield, 0.03, 0.16, 0);
-    put(new THREE.SphereGeometry(0.06, 14, 10, 0, Math.PI), 0xb39a5c, shield, 0.03, 0.16, 0, 0, Math.PI / 2);
+    put(new THREE.SphereGeometry(0.06, 14, 10, 0, Math.PI), BRASS, shield, 0.03, 0.16, 0, 0, Math.PI / 2);
     this.shield = shield;
 
     // ---- legs ----
@@ -285,7 +292,8 @@ export class Knight {
     }
     this.capeGeo = capeGeo;
     this.capeRest = Float32Array.from(capeGeo.attributes.position.array);
-    const cape = new THREE.Mesh(capeGeo, S.fill(0x4a1a15, { side: THREE.DoubleSide }));
+    const cape = new THREE.Mesh(capeGeo, S.fill(0x3f1410, { side: THREE.DoubleSide, rough: 0.95 }));
+    cape.castShadow = true;
     cape.position.set(0, 0.56, -0.2);
     torso.add(cape);
     this.cape = cape;
@@ -294,9 +302,9 @@ export class Knight {
     this.j = { torso, armR, elbowR, wristR, armL, elbowL, head };
 
     // a soft ink shadow under your feet
-    const shadowTex = this.game.fx.blotTex;
+    const shadowTex = this.game.fx.softTex;
     this.shadow = new THREE.Mesh(new THREE.CircleGeometry(0.55, 16),
-      new THREE.MeshBasicMaterial({ color: 0x1d1913, transparent: true, opacity: 0.3, depthWrite: false, map: shadowTex }));
+      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35, depthWrite: false, map: shadowTex }));
     this.shadow.rotation.x = -Math.PI / 2;
     this.shadow.renderOrder = 2;
     this.game.scene.add(this.shadow);

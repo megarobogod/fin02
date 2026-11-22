@@ -20,6 +20,7 @@ import * as THREE from 'three';
 import { lathe, capsule, rbox, plate } from './shapes.js';
 import { INK, WHITE, BLOOD } from './fx.js';
 import { KIND } from './combat.js';
+import { castShadows } from './materials.js';
 
 const KINDS = {
   civilian: { hp: 30, walk: 1.6, run: 5.0, radius: 0.35 },
@@ -117,13 +118,13 @@ class Person {
 
   // ================================================================ model
   build() {
-    const S = this.game.sketch, g = shapes();
+    const S = this.game.mats, g = shapes();
     const isRaider = this.hostile;
-    const cloth = S.fill(isRaider ? pick(RAIDER_CLOTH) : pick(CIV_CLOTH), { flash: this.flash });
-    const cloth2 = S.fill(isRaider ? 0x5a4a3c : pick(CIV_CLOTH), { flash: this.flash });
-    const skin = S.fill(pick(SKIN), { flash: this.flash });
-    const leather = S.fill(0x4a3a2c, { flash: this.flash });
-    const metal = S.fill(0x7d8084, { flash: this.flash });
+    const cloth = S.fill(isRaider ? pick(RAIDER_CLOTH) : pick(CIV_CLOTH), { flash: this.flash, rough: 0.95 });
+    const cloth2 = S.fill(isRaider ? 0x3e342b : pick(CIV_CLOTH), { flash: this.flash, rough: 0.95 });
+    const skin = S.fill(pick(SKIN), { flash: this.flash, rough: 0.55 });
+    const leather = S.fill(0x33271d, { flash: this.flash, rough: 0.7 });
+    const metal = S.fill(0x6f7276, { flash: this.flash, metal: 0.85, rough: 0.5 });
     const add = (geo, m, parent, x = 0, y = 0, z = 0) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); parent.add(o); return o; };
     const joint = (parent, x, y, z) => { const j = new THREE.Group(); j.position.set(x, y, z); j.rotation.order = 'YXZ'; parent.add(j); return j; };
 
@@ -153,7 +154,7 @@ class Person {
       else for (let i = 0; i < 5; i++) add(g.spike, leather, head, 0, 0.2 + Math.sin(i / 4 * Math.PI) * 0.02, -0.1 + i * 0.05).rotation.x = -0.3 + i * 0.15;
     } else {
       if (style < 0.5) add(g.hood, cloth2, head, 0, 0.09, -0.01);
-      else add(g.hair, S.fill(pick([0x2e241c, 0x5a4532, 0x8a7a68, 0x3d3530])), head, 0, 0.12, -0.01);
+      else add(g.hair, S.fill(pick([0x2e241c, 0x5a4532, 0x8a7a68, 0x3d3530]), { rough: 0.7 }), head, 0, 0.12, -0.01);
       if (Math.random() < 0.5) add(g.scarf, cloth2, head, 0, -0.03, 0).rotation.x = Math.PI / 2;
       if (Math.random() < 0.4) add(g.pack, cloth2, torso, 0, 0.3, -0.18);
     }
@@ -205,6 +206,7 @@ class Person {
     this.game.scene.add(sh);
     this.shadow = sh;
 
+    castShadows(this.body);
     this.j = { hips, torso, head, armR: R.sh, elbowR: R.el, armL: L.sh, elbowL: L.el, hand };
     this.legs = legs;
 
@@ -581,8 +583,8 @@ export class Humans {
     this.game = game;
     this.list = [];
     this.bolts = [];
-    this.shadowMat = new THREE.MeshBasicMaterial({ color: 0x1d1913, transparent: true, opacity: 0.28, depthWrite: false, map: game.fx.blotTex });
-    this.boltMat = game.sketch.fill(0x5b4a3a);
+    this.shadowMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.32, depthWrite: false, map: game.fx.softTex });
+    this.boltMat = game.mats.fill(0x4a3a2a, { rough: 0.7 });
     this.camps = [
       ...game.world.raiderCamps.map((c) => ({ ...c, type: 'raider' })),
       ...game.world.civilianCamps.map((c) => ({ ...c, type: 'civilian' })),

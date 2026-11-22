@@ -15,13 +15,16 @@ A 3D browser game for a parent and their son to build together and learn from.
 - You play a medieval knight with a sword and shield.
 - You mostly meet civilians and raiders. Angels (divine exterminators sent to wipe out the human race) are RARE and EXTREMELY dangerous.
 - Killing an angel triggers a big cinematic execution: impact frames, slow motion, a cool kill.
-- Sketched art style, high detail (not blocky).
+- Realistic, high-detail art (not blocky). It started as a sketched style and was changed to realistic.
+- A very large map.
 - Emphasis on impacts and weak points.
 
 ## How those ideas are built
-- **Sketched look**: `sketch.js` (paper + pencil hatching shader, windows painted on building walls) and `post.js` (ink outlines drawn from the depth image, boiling lines, impact frames). Holy light (gold) is the only bright colour.
+- **Realistic look**: `materials.js` (lit "PBR" materials; brick, concrete, tarmac, rust, puddles and windows are made by shaders, no image files; a hazy sky; a low sun with real shadows) and `post.js` (ambient occlusion, bloom, film tone mapping, impact frames). Holy light (gold) glows and blooms.
+- **Big map**: `world.js` plans a 25 x 25 block city and streams it: only blocks near you are built in full, far ones are plain boxes. Each block is built from its own seed so it always comes out the same.
+- **Speed**: the game starts on Low on laptop graphics and lowers its resolution by itself if frames are slow (`adaptResolution` in `main.js`).
 - **Detail**: characters are built from smooth shapes in `shapes.js` (lathes, capsules, bevelled plates, feathered wings), not boxes.
-- **Impacts**: hitstop, camera shake, impact frames, speed lines, comic sound words, stains that stay on the ground. Mostly `fx.js` and `post.js`.
+- **Impacts**: hitstop, camera shake, impact frames, speed lines, sparks, blood and glowing ichor, stains that stay on the ground. Mostly `fx.js` and `post.js`.
 - **Weak points**: every enemy is a set of "parts" (`combat.js`). Heads, hearts, cores and eyes take big damage; helmets, wings, masks and rings are armour that bounces the sword.
 - **Rare angels**: `angels.js` schedules a "visitation" every few minutes (first after ~2.5–4 min). One angel at a time.
 - **Execution**: `cinematic.js` takes over the camera and the knight when an angel's health hits zero.

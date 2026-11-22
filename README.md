@@ -4,8 +4,9 @@ The sky tore open and the city fell. Raiders rule its streets, and the last
 survivors hide in the ruins. Now and then, something comes down from the light
 to finish them. One knight still keeps an oath.
 
-A 3D action game in a hand-drawn, sketchbook style. Plain HTML, CSS and
-JavaScript with Three.js from a CDN. No build step.
+A 3D action game with realistic, physically lit graphics. Plain HTML, CSS and
+JavaScript with Three.js from a CDN. No build step, and no picture files: every
+brick, window and puddle is worked out by shaders.
 
 Play it online: <https://last-oath-seven.vercel.app>
 
@@ -28,15 +29,32 @@ Then open <http://localhost:5173>.
 | Hold left click | Charge a heavy slam, release to strike |
 | Right click | Raise your shield. Raise it just as a blow lands to **parry** |
 | `Space` | Roll. You can't be hurt mid-roll |
+| `F` | Kneel and steel your will: heals you, uses one charge of **resolve** |
 | `Q` (or middle click) | Lock on |
 | `M` | Mute |
 | `Esc` | Pause |
+| `G` | (On the title screen) switch graphics between Low and High |
 
 ## The city
 
-A grid of ruined streets around an old cathedral. Burnt cars, fallen lamp posts,
-a skyscraper lying across the road, craters where angels purged whole blocks, and
-a giant sword stuck in the ground where the first angel fell.
+A ruined city about 1.5 km across: 25 x 25 blocks round an old cathedral. Towers
+downtown, brick terraces further out, warehouses and tall chimneys in the
+industrial districts, parks of dead trees, burnt cars, a skyscraper lying across
+the road, craters where angels purged whole blocks (one huge one far to the
+south-east), and a giant sword stuck in the ground where the first angel fell.
+Smoke rises from fires on the horizon.
+
+The city is **streamed**: only the blocks near you are built in full detail.
+Further away each building is a plain box, which is all you can see through the
+dust. Blocks behind you are thrown away as you go.
+
+## Willpower
+
+Health is willpower. Press `F` to kneel and steel your will (1.6 seconds): you get
+45 back and use one of your three charges of **resolve** (gold diamonds by the
+bar). A blow breaks your focus but doesn't waste the charge. Resolve comes back by
+saving survivors (+1), resting at a survivors' fire with no raiders near (all of
+it, once a minute per camp) and unmaking an angel (all of it).
 
 **Survivors** hide in camps (tarps round a fire) or wander the streets. They run
 from raiders and angels. Kill the raider hunting one and you've **saved** them;
@@ -60,9 +78,9 @@ will kill anyone it catches, and two or three of its blows will kill you.
 
 Your sword does very different things depending on **what part** it hits:
 
-- **Glowing hearts and cores**: triple damage (CRACK!).
-- **Halos**: snap off and stun the angel (SNAP!).
-- **Wings, masks, rings**: armour. Your sword bounces off (CLANG).
+- **Glowing hearts and cores**: triple damage.
+- **Halos**: snap off and stun the angel.
+- **Wings, masks, rings**: armour. Your sword bounces off in a shower of sparks.
 - **Robes and bodies**: ordinary damage.
 
 | Angel | What it does | How to beat it |
@@ -81,16 +99,16 @@ wings tear away, and it bursts into a pillar of light. Your wounds close.
 | --- | --- |
 | `index.html` | The page, the HUD and menus, all the CSS |
 | `src/main.js` | Starting up, input, the game loop, hitstop and slow-motion |
-| `src/sketch.js` | The hand-drawn look: hatching, painted-on windows, the sky |
-| `src/post.js` | The ink lines, impact frames, speed lines, cinema bars |
+| `src/materials.js` | The look: lit materials, brick/concrete/road/rust shaders, painted-on windows, sky, sun and shadows |
+| `src/post.js` | Ambient occlusion, bloom, film tone mapping, impact frames, speed lines, cinema bars |
 | `src/shapes.js` | Smooth shapes: lathes, capsules, blades, feathers, wings |
-| `src/world.js` | The city: streets, buildings, camps, landmarks, collision |
+| `src/world.js` | The city: plan, streaming, buildings, camps, landmarks, collision |
 | `src/knight.js` | You: the model, poses, sword combos, shield, roll, cape |
 | `src/combat.js` | What your sword hits, and lock-on |
 | `src/humans.js` | Survivors and raiders, and who spawns where |
 | `src/angels.js` | The three angels, their weak points, and when they come |
 | `src/cinematic.js` | The angel execution, shot by shot |
-| `src/fx.js` | Particles, stains, CRACK! words, sword trail, debris |
+| `src/fx.js` | Sparks, blood, ichor, stains, sword trail, debris |
 | `src/camera.js` | The over-the-shoulder camera |
 | `src/hud.js` | Bars, the angel's health bar, banners, hints, lock-on |
 | `src/audio.js` | Every sound, made in code |
@@ -99,6 +117,13 @@ wings tear away, and it bursts into a pillar of light. Your wounds close.
 Tuning numbers sit at the top of each file: attack damage and timing in
 `knight.js` (`ATTACKS`), raider stats in `humans.js` (`KINDS`), angel health and
 damage in `angels.js` (`TYPES` and `HIT`), and so on.
+
+## Graphics quality
+
+The game picks **Low** on laptop graphics and **High** otherwise (press `G` on the
+title screen to change it). High adds ambient occlusion (soft shadows in corners),
+4x anti-aliasing and sharper sun shadows. On either setting the game lowers its
+internal resolution by itself if it can't keep up, and creeps back up when it can.
 
 ## Testing shortcuts
 

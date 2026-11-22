@@ -8,7 +8,7 @@
 //            slow motion it's smaller than realDt.
 // =====================================================
 import * as THREE from 'three';
-import { Sketch, PAPER_HEX } from './sketch.js';
+import { Materials, SUN_DIR, FOG_DENSITY, castShadows } from './materials.js';
 import { World } from './world.js';
 import { FX } from './fx.js';
 import { Sound } from './audio.js';
@@ -20,10 +20,26 @@ import { Post } from './post.js';
 import { Humans } from './humans.js';
 import { Cinematic } from './cinematic.js';
 
-// We pick our own colours exactly, so turn off three.js colour conversion
-THREE.ColorManagement.enabled = false;
-const FIRE = new THREE.Color(0xe07a2c);
-const FIRE2 = new THREE.Color(0xf0b43c);
+const FIRE = new THREE.Color(0xff7a24).multiplyScalar(3);
+const FIRE2 = new THREE.Color(0xffc060).multiplyScalar(3);
+const FIRE_LIGHTS = 3;          // real lights for the nearest camp fires
+
+/**
+ * Graphics quality. "high" adds ambient occlusion (soft shadows in corners)
+ * and sharper sun shadows. Built-in laptop graphics start on "low".
+ * Press G on the title screen to switch (the page reloads).
+ */
+function pickQuality() {
+  const saved = localStorage.getItem('lastOath.quality');
+  if (saved === 'high' || saved === 'low') return saved;
+  try {
+    const gl = document.createElement('canvas').getContext('webgl2');
+    const ext = gl && gl.getExtension('WEBGL_debug_renderer_info');
+    const gpu = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : '';
+    if (/intel|mali|adreno|powervr|apple gpu|swiftshader/i.test(gpu)) return 'low';
+  } catch (e) { /* no info: assume a proper graphics card */ }
+  return 'high';
+}
 
 class Input {
   constructor() {
@@ -74,25 +90,37 @@ class Game {
     this.slowT = 0;
     this.slowScale = 1;
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-    this.renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
-    this.renderer.setClearColor(PAPER_HEX);
+    this.quality = pickQuality();
+    // antialias is off here because post.js smooths edges itself
+    this.renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+    // a film-like curve that squeezes bright light into screen colours
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.05;
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = this.quality === 'high' ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+    // render scale: drops by itself if the computer can't keep up (see adaptResolution)
+    this.maxScale = Math.min(window.devicePixelRatio || 1, this.quality === 'high' ? 1.25 : 1);
+    this.scale = this.maxScale;
+    this.renderer.setPixelRatio(this.scale);
     document.getElementById('view').appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
-    this.camera = new THREE.PerspectiveCamera(62, 1, 0.1, 1200);
+    this.camera = new THREE.PerspectiveCamera(62, 1, 0.1, 1100);
     this.scene.add(this.camera);
 
-    this.sketch = new Sketch(this.renderer);
+    this.mats = new Materials(this.renderer);
+    this.scene.fog = new THREE.FogExp2(this.mats.fogColor(), FOG_DENSITY);
     this.post = new Post(this);
     this.fx = new FX(this);
     this.world = new World(this);
+    this.scene.environment = this.mats.makeEnvironment(this.world.skyMat);
+    this.makeLights();
     this.sound = new Sound();
     this.knight = new Knight(this);
     this.angels = new Angels(this);
     this.humans = new Humans(this);
     this.cinematic = new Cinematic(this);
+    castShadows(this.knight.root);
     this.hud = new HUD(this);
     this.rig = new CameraRig(this);
     this.rig.snap();
@@ -101,7 +129,7 @@ class Game {
     this.bindMenus();
     this.resize();
     window.addEventListener('resize', () => this.resize());
-    makePaperGrain();
+    this.showQuality();
 
     window.GAME = this;     // handy for poking at things from the browser console
     this.clock = new THREE.Clock();
@@ -133,6 +161,74 @@ class Game {
     window.addEventListener('keydown', (e) => {
       if (e.code === 'KeyM') this.sound.toggleMute();
       if (e.code === 'Escape' && this.state === 'playing') this.pause();
+      if (e.code === 'KeyG' && this.state !== 'playing') {
+        localStorage.setItem('lastOath.quality', this.quality === 'high' ? 'low' : 'high');
+        location.reload();
+      }
+    });
+  }
+
+  /**
+   * Dynamic resolution: every couple of seconds, look at how fast frames are
+   * coming. Too slow, and draw the 3D picture with fewer pixels (the HUD stays
+   * sharp). Plenty fast, and creep back up.
+   */
+  adaptResolution(rawDt) {
+    if (this.state !== 'playing' || document.hidden) { this.fpsT = 0; this.fpsN = 0; return; }
+    this.fpsT = (this.fpsT || 0) + rawDt;
+    this.fpsN = (this.fpsN || 0) + 1;
+    if (this.fpsT < 2) return;
+    const avg = this.fpsT / this.fpsN;
+    this.fpsT = 0; this.fpsN = 0;
+    let s = this.scale;
+    if (avg > 1 / 40) s = Math.max(0.6, s - 0.1);
+    else if (avg < 1 / 57) s = Math.min(this.maxScale, s + 0.05);
+    if (Math.abs(s - this.scale) > 0.01) { this.scale = s; this.renderer.setPixelRatio(s); this.resize(); }
+  }
+
+  showQuality() {
+    const el = document.getElementById('quality');
+    if (el) el.textContent = this.quality === 'high' ? 'High' : 'Low';
+  }
+
+  // ================================================================ light
+  makeLights() {
+    // the sun, whose shadow follows you around
+    this.sun = this.mats.makeSun(this.quality);
+    this.scene.add(this.sun, this.sun.target);
+    // a few real lights that hop to the nearest fires
+    this.fireLights = [];
+    for (let i = 0; i < FIRE_LIGHTS; i++) {
+      const l = new THREE.PointLight(0xff8a3a, 0, 16, 2);
+      this.scene.add(l);
+      this.fireLights.push(l);
+    }
+  }
+
+  updateLights() {
+    const k = this.knight.pos;
+    const c = this.camera.position;
+    // centre the sun's shadow a little ahead of the camera, snapped to its
+    // pixel grid so the shadow edges don't crawl as you move
+    const cx = k.x * 0.6 + c.x * 0.4, cz = k.z * 0.6 + c.z * 0.4;
+    const step = (2 * this.sun.shadow.camera.right) / this.sun.shadow.mapSize.x;
+    const sx = Math.round(cx / step) * step, sz = Math.round(cz / step) * step;
+    this.sun.target.position.set(sx, 0, sz);
+    this.sun.position.set(sx + SUN_DIR.x * 200, SUN_DIR.y * 200, sz + SUN_DIR.z * 200);
+    // fire lights flicker
+    this.fireLightT = (this.fireLightT || 0) - 1;
+    if (this.fireLightT <= 0) {
+      this.fireLightT = 15;
+      const near = this.world.fires
+        .map((f) => [Math.hypot(f.x - k.x, f.z - k.z), f])
+        .filter((a) => a[0] < 60).sort((a, b) => a[0] - b[0]);
+      this.fireLights.forEach((l, i) => { l.fire = near[i] ? near[i][1] : null; });
+    }
+    const t = this.realTime;
+    this.fireLights.forEach((l, i) => {
+      if (!l.fire) { l.intensity = 0; return; }
+      l.position.set(l.fire.x, l.fire.y + 0.6, l.fire.z);
+      l.intensity = (l.fire.size > 0.55 ? 9 : 7) * (0.8 + 0.12 * Math.sin(t * 13 + i) + 0.08 * Math.sin(t * 29 + i * 2));
     });
   }
 
@@ -149,7 +245,7 @@ class Game {
     this.angels.reset();
     this.humans.reset();
     this.hud.boss(null);
-    this.sketch.shared.uRiftGlow.value = 0;
+    this.mats.shared.uRiftGlow.value = 0;
     this.knight.reset();
     this.rig.snap();
     this.hud.seen.clear();
@@ -202,9 +298,11 @@ class Game {
   }
 
   frame() {
-    const realDt = Math.min(0.05, this.clock.getDelta());
+    const rawDt = this.clock.getDelta();
+    const realDt = Math.min(0.05, rawDt);
+    this.adaptResolution(rawDt);
     this.realTime += realDt;
-    this.sketch.update(realDt);
+    this.mats.update(realDt);
 
     // work out game time: frozen in hitstop, slowed in slow-mo
     let dt = 0;
@@ -225,7 +323,8 @@ class Game {
       this.hud.update(realDt);
       this.fx.draw2d(realDt);
       this.input.endFrame();
-      this.post.render(this.scene, this.camera);
+      this.updateLights();
+      this.post.render();
       return;
     }
     if (this.state === 'playing' || this.state === 'dead') {
@@ -248,33 +347,8 @@ class Game {
     this.world.update(this.camera);
     this.fx.draw2d(realDt);
     this.input.endFrame();
-    this.post.render(this.scene, this.camera);
-  }
-}
-
-/** Paper texture: speckles and fibres, laid over the whole screen. */
-function makePaperGrain() {
-  const c = document.createElement('canvas');
-  c.width = c.height = 256;
-  const g = c.getContext('2d');
-  const img = g.createImageData(256, 256);
-  for (let i = 0; i < img.data.length; i += 4) {
-    const v = Math.random();
-    const dark = v < 0.5 ? 60 + v * 100 : 255;
-    img.data[i] = dark; img.data[i + 1] = dark * 0.95; img.data[i + 2] = dark * 0.85;
-    img.data[i + 3] = v < 0.5 ? Math.random() * 40 : Math.random() * 25;
-  }
-  g.putImageData(img, 0, 0);
-  g.strokeStyle = 'rgba(120,100,70,0.12)';
-  for (let i = 0; i < 70; i++) {
-    g.lineWidth = Math.random() * 1.2;
-    const x = Math.random() * 256, y = Math.random() * 256, a = Math.random() * 6.28, l = 6 + Math.random() * 22;
-    g.beginPath(); g.moveTo(x, y); g.quadraticCurveTo(x + Math.cos(a + 0.5) * l * 0.5, y + Math.sin(a + 0.5) * l * 0.5, x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke();
-  }
-  const url = c.toDataURL();
-  for (const id of ['paper', 'start-screen', 'dead-screen']) {
-    const el = document.getElementById(id);
-    if (el) el.style.backgroundImage = `url(${url})`;
+    this.updateLights();
+    this.post.render();
   }
 }
 

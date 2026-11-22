@@ -1,137 +1,122 @@
 // =====================================================
-// post.js - the finishing pass over the whole picture
+// post.js - the finishing passes over the whole picture
 //
-// The 3D scene is first drawn into an off-screen image (plus a "depth" image
-// that says how far away each pixel is). Then one full-screen shader:
-//   - draws INK LINES wherever the depth jumps (outlines) or bends (creases)
-//   - makes those lines wobble ("boil") like hand-drawn animation
-//   - does IMPACT FRAMES: the picture flips to pure ink for a split second
-//   - adds speed lines, a slow-motion sepia tint and cinema bars
+// The 3D scene is drawn into an off-screen image first, then:
+//   1. (high quality only) ambient occlusion: darkens creases and corners
+//      where light can't reach, like the gap under a car
+//   2. bloom: very bright things (holy gold, fire, the sun) glow and bleed
+//   3. output: squeezes the bright "HDR" light into screen colours, like a
+//      film camera does ("tone mapping")
+//   4. grade: our own shader for the cinematic stuff - impact frames, slow
+//      motion colour, speed lines, cinema bars, plus lens dirt like a vignette
+//      and film grain
 // =====================================================
 import * as THREE from 'three';
-import { INK_HEX, PAPER_HEX, GOLD_HEX } from './sketch.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
+import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
 
-const VERT = /* glsl */`
-varying vec2 vUv;
-void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
+const BLOOM_STRENGTH = 0.4;
+const BLOOM_RADIUS = 0.5;
+const BLOOM_THRESHOLD = 1.1;   // only light brighter than white blooms
 
-const FRAG = /* glsl */`
-uniform sampler2D tColor;
-uniform sampler2D tDepth;
-uniform vec2 uRes;
-uniform float uNear;
-uniform float uFar;
-uniform float uTime;
-uniform float uPx;
-uniform float uFogFar;
-uniform float uImpact;   // 0 normal, 1 inverted, 2 ink-on-paper, 3 paper-on-ink
-uniform float uSpeed;    // speed lines, 0..1
-uniform float uBars;     // cinema bars, 0..1
-uniform float uSlow;     // slow-motion tint, 0..1
-uniform float uBlur;     // zoom blur towards the middle
-uniform float uFlash;    // white flash
-uniform vec3 uInk;
-uniform vec3 uPaper;
-uniform vec3 uGold;
-varying vec2 vUv;
+const GRADE = {
+  uniforms: {
+    tDiffuse: { value: null },
+    uRes: { value: new THREE.Vector2(1, 1) },
+    uTime: { value: 0 },
+    uImpact: { value: 0 },   // 0 normal, 1 negative, 2 harsh black and white, 3 white-on-black
+    uSpeed: { value: 0 },    // speed lines, 0..1
+    uBars: { value: 0 },     // cinema bars, 0..1
+    uSlow: { value: 0 },     // slow-motion grade, 0..1
+    uBlur: { value: 0 },     // zoom blur towards the middle
+    uFlash: { value: 0 },    // white flash
+  },
+  vertexShader: /* glsl */`
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: /* glsl */`
+    uniform sampler2D tDiffuse;
+    uniform vec2 uRes;
+    uniform float uTime, uImpact, uSpeed, uBars, uSlow, uBlur, uFlash;
+    varying vec2 vUv;
+    float hash12(vec2 p) {
+      vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+      p3 += dot(p3, p3.yzx + 33.33);
+      return fract((p3.x + p3.y) * p3.z);
+    }
+    void main() {
+      vec2 uv = vUv;
+      vec2 dir = uv - 0.5;
+      // colour fringes at the edge of the lens, stronger on big hits
+      float ca = 0.0012 + uSpeed * 0.004 + (uImpact > 0.5 ? 0.006 : 0.0);
+      vec3 col;
+      col.r = texture2D(tDiffuse, uv - dir * ca).r;
+      col.g = texture2D(tDiffuse, uv).g;
+      col.b = texture2D(tDiffuse, uv + dir * ca).b;
+      if (uBlur > 0.001) {
+        vec3 acc = col;
+        for (int i = 1; i < 10; i++) acc += texture2D(tDiffuse, uv - dir * uBlur * float(i) / 10.0).rgb;
+        col = acc / 10.0;
+      }
+      float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+      float sat = max(col.r, max(col.g, col.b)) - min(col.r, min(col.g, col.b));
 
-float hash12(vec2 p) {
-  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-  p3 += dot(p3, p3.yzx + 33.33);
-  return fract((p3.x + p3.y) * p3.z);
-}
-float vnoise(vec2 p) {
-  vec2 i = floor(p), f = fract(p);
-  vec2 u = f * f * (3.0 - 2.0 * f);
-  return mix(mix(hash12(i), hash12(i + vec2(1.0, 0.0)), u.x),
-             mix(hash12(i + vec2(0.0, 1.0)), hash12(i + vec2(1.0, 1.0)), u.x), u.y);
-}
-float lin(vec2 uv) {
-  float z = texture2D(tDepth, uv).x;
-  float ndc = z * 2.0 - 1.0;
-  return (2.0 * uNear * uFar) / (uFar + uNear - ndc * (uFar - uNear));
-}
+      // ---- slow motion: drain the colour, crush the shadows, keep the gold ----
+      if (uSlow > 0.001) {
+        vec3 grey = vec3(lum) * vec3(1.05, 1.0, 0.92);
+        vec3 keep = mix(grey, col, smoothstep(0.25, 0.45, sat) * step(col.b, col.r));
+        keep = pow(keep, vec3(1.15));
+        col = mix(col, keep, uSlow * 0.9);
+      }
 
-void main() {
-  vec2 uv = vUv;
-  vec2 px = 1.0 / uRes;
-  float boil = floor(uTime * 7.0);
+      // ---- impact frames: a split second of stark, burnt-out contrast ----
+      if (uImpact > 0.5 && uImpact < 1.5) {
+        col = vec3(1.0) - col;
+      } else if (uImpact > 1.5 && uImpact < 2.5) {
+        float v = smoothstep(0.26, 0.3, lum);
+        col = mix(vec3(0.02), vec3(1.0, 0.97, 0.92), v);
+        if (sat > 0.3 && col.r > col.b) col = vec3(1.0, 0.72, 0.25);
+      } else if (uImpact > 2.5) {
+        float v = 1.0 - smoothstep(0.2, 0.24, lum);
+        col = mix(vec3(0.02), vec3(1.0, 0.97, 0.92), v);
+        if (sat > 0.3 && lum > 0.4) col = vec3(1.0, 0.72, 0.25);
+      }
 
-  vec3 col = texture2D(tColor, uv).rgb;
-  if (uBlur > 0.001) {
-    vec2 dir = uv - 0.5;
-    vec3 acc = col;
-    for (int i = 1; i < 8; i++) acc += texture2D(tColor, uv - dir * uBlur * float(i) / 8.0).rgb;
-    col = acc / 8.0;
-  }
+      // ---- speed lines rushing to the middle ----
+      if (uSpeed > 0.001) {
+        vec2 d = dir;
+        d.x *= uRes.x / uRes.y;
+        float a = atan(d.y, d.x);
+        float r = length(d);
+        float frame = floor(uTime * 24.0);
+        float band = floor(a * 90.0);
+        float on = step(0.8, hash12(vec2(band, frame)));
+        float len = 0.3 + 0.25 * hash12(vec2(band, frame + 9.0));
+        float line = on * smoothstep(len, len + 0.12, r) * (1.0 - smoothstep(0.0, 0.6, abs(fract(a * 90.0) - 0.5) * 2.0 - 0.1));
+        vec3 lineCol = uImpact > 2.5 ? vec3(0.02) : vec3(1.0, 0.97, 0.9);
+        col = mix(col, lineCol, clamp(line * uSpeed * 0.6, 0.0, 1.0));
+      }
 
-  // ---- ink lines from the depth image ----
-  vec2 wob = (vec2(vnoise(uv * vec2(70.0, 48.0) + boil * 3.1), vnoise(uv * vec2(48.0, 70.0) - boil * 1.7)) - 0.5) * px * 2.4 * uPx;
-  vec2 c = uv + wob;
-  vec2 e = px * 1.2 * uPx;
-  float d0 = lin(c);
-  float dl = lin(c - vec2(e.x, 0.0)), dr = lin(c + vec2(e.x, 0.0));
-  float du = lin(c + vec2(0.0, e.y)), dd = lin(c - vec2(0.0, e.y));
-  float dmin = min(d0, min(min(dl, dr), min(du, dd)));
-  // outlines: a sudden jump in distance
-  float sil = max(max(abs(dl - d0), abs(dr - d0)), max(abs(du - d0), abs(dd - d0))) / dmin;
-  // creases: where a surface folds (measured on 1/depth, which is flat on flat faces)
-  float w0 = 1.0 / d0;
-  float lap = abs(1.0 / dl + 1.0 / dr + 1.0 / du + 1.0 / dd - 4.0 * w0) / w0;
-  float edge = smoothstep(0.03, 0.065, sil);
-  edge = max(edge, smoothstep(0.012, 0.035, lap) * 0.8 * (1.0 - smoothstep(25.0, 70.0, dmin)));
-  // lines fade into the distance with everything else
-  edge *= 1.0 - smoothstep(uFogFar * 0.4, uFogFar * 0.95, dmin);
-  // pen pressure: lines vary a bit in darkness along their length
-  edge *= 0.75 + 0.25 * vnoise(uv * 300.0 + boil);
-  col = mix(col, uInk, clamp(edge, 0.0, 1.0) * 0.95);
+      col = mix(col, vec3(1.0, 0.98, 0.94), uFlash);
 
-  // ---- slow motion: drain the colour towards sepia ----
-  float lum = dot(col, vec3(0.299, 0.587, 0.114));
-  float sat = max(col.r, max(col.g, col.b)) - min(col.r, min(col.g, col.b));
-  if (uSlow > 0.001) {
-    vec3 sepia = vec3(lum * 1.06, lum * 0.98, lum * 0.86);
-    vec3 keep = sat > 0.3 ? col : sepia;     // gold stays gold
-    col = mix(col, keep, uSlow * 0.85);
-    float vig = smoothstep(0.35, 0.85, length(uv - 0.5));
-    col = mix(col, uInk, vig * uSlow * 0.5);
-  }
+      // ---- lens: darker corners and fine film grain ----
+      float vig = smoothstep(0.35, 0.95, length(dir * vec2(uRes.x / uRes.y, 1.0) * 0.85));
+      col *= 1.0 - vig * (0.42 + uSlow * 0.35);
+      col += (hash12(gl_FragCoord.xy + fract(uTime) * 371.0) - 0.5) * 0.035;
 
-  // ---- impact frames ----
-  if (uImpact > 0.5 && uImpact < 1.5) {
-    col = vec3(1.0) - col;
-  } else if (uImpact > 1.5 && uImpact < 2.5) {
-    col = lum > 0.55 && edge < 0.4 ? uPaper : uInk;
-    if (sat > 0.32) col = uGold;
-  } else if (uImpact > 2.5) {
-    col = (edge > 0.35 || lum > 0.72) ? uPaper : uInk;
-    if (sat > 0.32) col = uGold;
-  }
-
-  // ---- speed lines rushing to the centre ----
-  if (uSpeed > 0.001) {
-    vec2 d = uv - 0.5;
-    d.x *= uRes.x / uRes.y;
-    float a = atan(d.y, d.x);
-    float r = length(d);
-    float band = floor(a * 70.0);
-    float on = step(0.78, hash12(vec2(band, boil)));
-    float len = 0.32 + 0.25 * hash12(vec2(band, boil + 9.0));
-    float line = on * smoothstep(len, len + 0.08, r) * (1.0 - smoothstep(0.0, 0.5, abs(fract(a * 70.0) - 0.5) * 2.0 - 0.2));
-    vec3 lineCol = uImpact > 2.5 ? uPaper : uInk;
-    col = mix(col, lineCol, clamp(line * uSpeed, 0.0, 1.0));
-  }
-
-  col = mix(col, vec3(1.0, 0.98, 0.92), uFlash);
-
-  // ---- cinema bars with a rough brushed edge ----
-  if (uBars > 0.001) {
-    float h = uBars * 0.13 + (vnoise(vec2(uv.x * 40.0, boil)) - 0.5) * 0.008 * uBars;
-    if (uv.y < h || uv.y > 1.0 - h) col = uInk;
-  }
-
-  gl_FragColor = vec4(col, 1.0);
-}`;
+      // ---- cinema bars ----
+      if (uBars > 0.001) {
+        float h = uBars * 0.12;
+        if (uv.y < h || uv.y > 1.0 - h) col = vec3(0.0);
+      }
+      gl_FragColor = vec4(col, 1.0);
+    }`,
+};
 
 export class Post {
   constructor(game) {
@@ -144,60 +129,50 @@ export class Post {
     this.slow = 0;
     this.blur = 0;
     this.flash = 0;
+    this.quality = game.quality;
 
-    const depth = new THREE.DepthTexture(4, 4);
-    depth.type = THREE.UnsignedIntType;
-    this.target = new THREE.WebGLRenderTarget(4, 4, {
-      depthTexture: depth,
-      minFilter: THREE.LinearFilter,
-      magFilter: THREE.LinearFilter,
-    });
-    this.mat = new THREE.ShaderMaterial({
-      uniforms: {
-        tColor: { value: this.target.texture },
-        tDepth: { value: depth },
-        uRes: { value: new THREE.Vector2(4, 4) },
-        uNear: { value: 0.1 }, uFar: { value: 1000 },
-        uTime: game.sketch.shared.uTime,
-        uPx: game.sketch.shared.uPx,
-        uFogFar: game.sketch.shared.uFogFar,
-        uImpact: { value: 0 }, uSpeed: { value: 0 }, uBars: { value: 0 },
-        uSlow: { value: 0 }, uBlur: { value: 0 }, uFlash: { value: 0 },
-        uInk: { value: new THREE.Color(INK_HEX) },
-        uPaper: { value: new THREE.Color(PAPER_HEX) },
-        uGold: { value: new THREE.Color(GOLD_HEX) },
-      },
-      vertexShader: VERT,
-      fragmentShader: FRAG,
-      depthTest: false,
-      depthWrite: false,
-    });
-    this.quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.mat);
-    this.quad.frustumCulled = false;
-    this.scene = new THREE.Scene();
-    this.scene.add(this.quad);
-    this.cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    // the off-screen images hold light brighter than white ("half float").
+    // On high quality, edges are smoothed with 4x multisampling. On low, a
+    // much cheaper trick (FXAA) blurs just the jagged edges at the end.
+    const high = this.quality === 'high';
+    const target = new THREE.WebGLRenderTarget(4, 4, { type: THREE.HalfFloatType, samples: high ? 4 : 0 });
+    this.composer = new EffectComposer(this.renderer, target);
+    this.composer.addPass(new RenderPass(game.scene, game.camera));
+    if (this.quality === 'high') {
+      this.ao = new GTAOPass(game.scene, game.camera, 4, 4);
+      this.ao.updateGtaoMaterial({ radius: 0.6, distanceExponent: 1.5, thickness: 1, scale: 1.2, samples: 12 });
+      this.ao.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 6, rings: 2, samples: 12 });
+      this.ao.blendIntensity = 0.9;
+      this.composer.addPass(this.ao);
+    }
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(4, 4), BLOOM_STRENGTH, BLOOM_RADIUS, BLOOM_THRESHOLD);
+    this.composer.addPass(this.bloom);
+    this.composer.addPass(new OutputPass());
+    if (!high) {
+      this.fxaa = new ShaderPass(FXAAShader);
+      this.composer.addPass(this.fxaa);
+    }
+    this.grade = new ShaderPass(GRADE);
+    this.composer.addPass(this.grade);
   }
 
   setSize(w, h) {
+    this.composer.setPixelRatio(this.renderer.getPixelRatio());
+    this.composer.setSize(w, h);
     const pr = this.renderer.getPixelRatio();
-    this.target.setSize(Math.floor(w * pr), Math.floor(h * pr));
-    this.mat.uniforms.uRes.value.set(Math.floor(w * pr), Math.floor(h * pr));
+    this.grade.uniforms.uRes.value.set(w * pr, h * pr);
+    if (this.fxaa) this.fxaa.uniforms.resolution.value.set(1 / (w * pr), 1 / (h * pr));
   }
 
-  render(scene, camera) {
-    const u = this.mat.uniforms;
-    u.uNear.value = camera.near;
-    u.uFar.value = camera.far;
+  render() {
+    const u = this.grade.uniforms;
+    u.uTime.value = this.game.realTime;
     u.uImpact.value = this.impact;
     u.uSpeed.value = this.speed;
     u.uBars.value = this.bars;
     u.uSlow.value = this.slow;
     u.uBlur.value = this.blur;
     u.uFlash.value = this.flash;
-    this.renderer.setRenderTarget(this.target);
-    this.renderer.render(scene, camera);
-    this.renderer.setRenderTarget(null);
-    this.renderer.render(this.scene, this.cam);
+    this.composer.render();
   }
 }

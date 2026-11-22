@@ -18,7 +18,7 @@
 // Land the killing blow and cinematic.js takes over for the execution.
 // =====================================================
 import * as THREE from 'three';
-import { GOLD_HEX } from './sketch.js';
+import { GOLD_HEX, castShadows } from './materials.js';
 import { ICHOR, INK, WHITE } from './fx.js';
 import { KIND } from './combat.js';
 import { lathe, capsule, wingGeo, plate } from './shapes.js';
@@ -136,6 +136,7 @@ class Angel {
     if (type === 'herald') this.buildHerald();
     else if (type === 'choir') this.buildChoir();
     else this.buildOphan();
+    castShadows(this.body);
     this.bang.position.y = this.topY + 0.6;
     this.bangRed.position.y = this.topY + 0.6;
   }
@@ -153,13 +154,14 @@ class Angel {
     return o;
   }
   mats() {
-    const S = this.game.sketch;
+    const S = this.game.mats;
     return {
-      pale: S.fill(0xefe9dc, { flash: this.flash, side: THREE.DoubleSide }),
-      shade: S.fill(0xd6ccb6, { flash: this.flash, side: THREE.DoubleSide }),
-      porcelain: S.fill(0xf6f2ea, { flash: this.flash, hatch: 0.6 }),
+      // marble-white robes and feathers, a glazed porcelain face, gilded trim
+      pale: S.fill(0xe8e2d6, { flash: this.flash, side: THREE.DoubleSide, rough: 0.6 }),
+      shade: S.fill(0xcfc6b4, { flash: this.flash, side: THREE.DoubleSide, rough: 0.7 }),
+      porcelain: S.fill(0xf4f0e8, { flash: this.flash, rough: 0.25, coat: true }),
       gold: S.glow(GOLD_HEX),
-      paleGold: S.fill(0xd9bd78, { flash: this.flash }),
+      paleGold: S.fill(0xd9b56a, { flash: this.flash, metal: 1, rough: 0.3 }),
     };
   }
   put(geo, mat, parent, x = 0, y = 0, z = 0) {
@@ -170,7 +172,7 @@ class Angel {
   }
 
   makeHeart(x, y, z) {
-    const heart = this.put(shapes().heart, this.game.sketch.glow(GOLD_HEX), this.body, x, y, z);
+    const heart = this.put(shapes().heart, this.game.mats.glow(GOLD_HEX), this.body, x, y, z);
     heart.add(this.game.fx.glowSprite(1.0));
     this.heart = heart;
     return heart;
@@ -303,9 +305,9 @@ class Angel {
 
   buildOphan() {
     const g = shapes(), m = this.mats(), B = this.body;
-    const S = this.game.sketch;
-    const tarn = S.fill(0xd6c08a, { flash: this.flash });
-    const white = S.fill(0xf6f2e8, { flash: this.flash, hatch: 0.5 });
+    const S = this.game.mats;
+    const tarn = S.fill(0xc9a866, { flash: this.flash, metal: 1, rough: 0.38 });
+    const white = S.fill(0xf6f2e8, { flash: this.flash, rough: 0.15, coat: true });
     const ink = S.glow(0x1d1913);
     this.core = this.put(g.core, m.gold, B);
     this.core.add(this.game.fx.glowSprite(2.6));
@@ -888,7 +890,7 @@ export class Angels {
     if (this.omen) {
       const o = this.omen;
       o.t += dt;
-      game.sketch.shared.uRiftGlow && (game.sketch.shared.uRiftGlow.value = Math.min(1, o.t / 3));
+      game.mats.shared.uRiftGlow && (game.mats.shared.uRiftGlow.value = Math.min(1, o.t / 3));
       if (o.t > 2.5 && !o.beamed) { o.beamed = true; game.fx.beam(o.x, o.z, 5); game.sound.choir(1); }
       if (o.t > 3.6) {
         const a = this.spawn(o.type, o.x, o.z);
@@ -914,7 +916,7 @@ export class Angels {
     this.kills++;
     this.nextVisit = 240 + Math.random() * 150;
     this.game.hud.boss(null);
-    if (this.game.sketch.shared.uRiftGlow) this.game.sketch.shared.uRiftGlow.value = 0;
+    if (this.game.mats.shared.uRiftGlow) this.game.mats.shared.uRiftGlow.value = 0;
   }
 
   // ================================================================ your sword

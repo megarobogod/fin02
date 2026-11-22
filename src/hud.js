@@ -133,18 +133,19 @@ export class HUD {
       return { x: (v.x * 0.5 + 0.5) * w, y: (-v.y * 0.5 + 0.5) * h, behind: v.z > 1 };
     };
 
-    // ---- the lock-on circle: drawn twice, a little wobbly, like a pen ----
+    // ---- the lock-on circle: two thin rings ----
     const lock = game.rig.lock;
     if (lock && lock.alive) {
       const s = toScreen(lock.aimPoint(new THREE.Vector3()));
       if (!s.behind) {
         g.save();
-        g.strokeStyle = 'rgba(29,25,19,0.9)';
-        g.lineWidth = 3 * scale;
+        g.strokeStyle = 'rgba(236,230,218,0.85)';
+        g.shadowColor = 'rgba(0,0,0,0.8)'; g.shadowBlur = 4 * scale;
+        g.lineWidth = 2 * scale;
         for (let k = 0; k < 2; k++) {
-          const j = Math.sin(boil * 12.9 + k * 4) * 3 * scale;
+          const j = 0;
           g.beginPath();
-          g.ellipse(s.x + j, s.y - j * 0.5, (34 + k * 4) * scale, (31 + k * 3) * scale, boil * 0.3 + k, 0.2, Math.PI * 2 - 0.1);
+          g.ellipse(s.x + j, s.y - j * 0.5, (30 + k * 5) * scale, (30 + k * 5) * scale, 0, 0, Math.PI * 2);
           g.stroke();
         }
         g.restore();
@@ -160,7 +161,7 @@ export class HUD {
         g.translate(q.x, q.y);
         g.rotate(Math.PI / 4);
         g.fillStyle = 'rgba(240,180,60,0.9)';
-        g.strokeStyle = '#1d1913';
+        g.strokeStyle = 'rgba(0,0,0,0.7)';
         g.lineWidth = 2 * scale;
         g.fillRect(-r / 2, -r / 2, r, r);
         g.strokeRect(-r / 2, -r / 2, r, r);
@@ -191,7 +192,7 @@ export class HUD {
       g.lineTo(-size * 0.4, 0);
       g.lineTo(-size * 0.7, size * 0.65);
       g.closePath();
-      g.fillStyle = a.state === 'windup' || a.state === 'charge' || a.state === 'burstWind' || a.state === 'ramWind' ? '#c9412f' : '#1d1913';
+      g.fillStyle = a.state === 'windup' || a.state === 'charge' || a.state === 'burstWind' || a.state === 'ramWind' ? '#e0412f' : 'rgba(236,230,218,0.85)';
       g.fill();
       g.restore();
     }
