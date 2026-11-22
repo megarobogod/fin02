@@ -21,6 +21,7 @@ import { lathe, smoothLathe, capsule, ellipsoid, plate, scaled, finish } from '.
 import { INK, WHITE, BLOOD } from './fx.js';
 import { KIND } from './combat.js';
 import { castShadows } from './materials.js';
+import { Skin, peopleReady } from './people.js';
 
 const KINDS = {
   civilian: { hp: 30, walk: 1.6, run: 5.0, radius: 0.35 },
@@ -29,6 +30,7 @@ const KINDS = {
   brute: { hp: 140, walk: 1.8, run: 3.8, radius: 0.55, damage: 26, reach: 2.4, windup: 0.85, rest: [2.0, 3.0], scale: 1.28 },
 };
 
+const SKIN_RANGE = 95;     // people further away than this aren't drawn (they're lost in the haze anyway)
 const MAX_ATTACKERS = 2;   // how many raiders may be swinging at you at the same moment
 const SPAWN_NEAR = 110;    // camps fill up when you get this close
 const DESPAWN_FAR = 150;   // ...and empty when you get this far away
@@ -39,6 +41,13 @@ function angleLerp(a, b, t) {
   return a + d * t;
 }
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+/** A grimy colour to multiply a model by, so bright clothes turn dusty and dull. */
+function dirt(raider, brute) {
+  const v = 0.8 + Math.random() * 0.3;
+  if (raider) return brute ? new THREE.Color(0.42, 0.4, 0.37) : new THREE.Color(0.5 * v, 0.5 * v, 0.46 * v);
+  return new THREE.Color(0.62 * v, 0.55 * v, 0.48 * v);
+}
 
 // ---------- shared shapes (made once) ----------
 let G = null;
@@ -247,6 +256,18 @@ class Person {
       legs.push({ hip, knee });
     }
 
+    // With the real human models loaded, our shapes become an invisible skeleton and the model follows it.
+    let body3d = null;
+    if (peopleReady) {
+      this.body.traverse((o) => { if (o.isMesh) o.visible = false; });
+      const brute = this.kind === 'brute';
+      body3d = new Skin(isRaider ? 'soldier' : 'michelle', {
+        body: this.body, hips, torso, head, armR: R.sh, elbowR: R.el, armL: L.sh, elbowL: L.el, legs,
+      }, isRaider ? 1.78 : 1.6 + Math.random() * 0.14, dirt(isRaider, brute), this.game.mats.noise);
+      this.body.add(body3d.root);
+      this.skin = body3d;
+    }
+
     // weapon in the right hand
     const hand = joint(R.el, 0, -0.29, 0);
     if (this.kind === 'thug') {
@@ -261,6 +282,9 @@ class Person {
       add(g.bow, metal, xb, 0, 0.02, 0.36).rotation.set(Math.PI / 2, 0, Math.PI * 0.6);
       this.xbow = xb;
     }
+
+    // the weapon moves from our invisible hand to the real one
+    if (body3d) for (const c of [...hand.children]) body3d.anchor.add(c);
 
     // a soft ink shadow
     const sh = new THREE.Mesh(g.shadow, this.owner.shadowMat);
@@ -615,6 +639,15 @@ class Person {
     this.root.rotation.y = this.yaw;
     this.shadow.position.set(this.pos.x, this.pos.y + 0.03, this.pos.z);
     this.shadow.visible = this.alive;
+    if (this.skin) {
+      // level of detail: far people are skipped, middle-distance people are updated every other frame
+      const k = this.game.knight.pos;
+      const d = Math.hypot(k.x - this.pos.x, k.z - this.pos.z);
+      this.skin.root.visible = d < SKIN_RANGE;
+      this.skin.setShadows(d < 30);
+      this.skinFrame = (this.skinFrame || 0) + 1;
+      if (d < SKIN_RANGE && (d < 35 || this.skinFrame % 2 === 0 || this.state === 'dead')) this.skin.update(this.flash.value);
+    }
   }
 
   updateDead(dt) {
@@ -636,6 +669,7 @@ class Person {
   dispose() {
     this.game.scene.remove(this.root);
     this.game.scene.remove(this.shadow);
+    if (this.skin) this.skin.dispose();
     this.removed = true;
   }
 }

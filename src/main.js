@@ -19,6 +19,7 @@ import { CameraRig } from './camera.js';
 import { Post } from './post.js';
 import { Humans } from './humans.js';
 import { Cinematic } from './cinematic.js';
+import { loadPeople } from './people.js';
 
 const FIRE = new THREE.Color(0xff7a24).multiplyScalar(3);
 const FIRE2 = new THREE.Color(0xffc060).multiplyScalar(3);
@@ -356,4 +357,10 @@ class Game {
   }
 }
 
+// download the human models first (the title screen shows while they load)
+const promptEl = document.querySelector('#start-screen .prompt');
+const promptText = promptEl.textContent;
+promptEl.textContent = 'Loading...';
+await loadPeople();
+promptEl.textContent = promptText;
 new Game();

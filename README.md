@@ -106,6 +106,7 @@ wings tear away, and it bursts into a pillar of light. Your wounds close.
 | `src/knight.js` | You: the model, poses, sword combos, shield, roll, cape |
 | `src/combat.js` | What your sword hits, and lock-on |
 | `src/humans.js` | Survivors and raiders, and who spawns where |
+| `src/people.js` | Loads the real human models in `assets/` and makes them follow the simple skeleton `humans.js` animates |
 | `src/angels.js` | The three angels, their weak points, and when they come |
 | `src/cinematic.js` | The angel execution, shot by shot |
 | `src/fx.js` | Sparks, blood, ichor, stains, sword trail, debris |
